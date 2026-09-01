@@ -1,0 +1,94 @@
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created, ready for development
+#   - in-progress: Developer actively working on implementation
+#   - review: Implementation complete, ready for review
+#   - done: Story completed
+
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when its first story starts (via build's sprint sync)
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates the next story after the previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; the status view surfaces open ones
+generated: 09-01-2026 02:10
+last_updated: 09-01-2026 02:10
+project: claudingtin
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+development_status:
+  epic-1: backlog
+  1-1-monorepo-scaffold-and-the-proto-wire-contract: backlog
+  1-2-ci-cross-build-and-release-skeleton: backlog
+  1-3-transcript-format-spike-and-defensive-parser: backlog
+  1-4-minimal-backend-hello-connection-registry-status-skeleton: backlog
+  1-5-account-key-at-a-reinstall-stable-path: backlog
+  1-6-companion-launch-transcript-watch-ready-busy-over-the-websoc: backlog
+  1-7-sessionstart-hook-fail-open-launch: backlog
+  1-8-pane-placement: backlog
+  1-9-first-run-screen-and-18-gate-as-a-local-precondition: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-fifo-queue-and-single-writer-pairing-loop: backlog
+  2-2-curated-opener-set-and-per-match-selection: backlog
+  2-3-chat-surface-render-and-input: backlog
+  2-4-in-memory-message-relay: backlog
+  2-5-searching-and-matched-transition-with-the-spin: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-unified-session_ended-on-every-backend-side-end: backlog
+  3-2-their-claude-came-back-presentation-and-no-alarm-language: backlog
+  3-3-explicit-leave-control: backlog
+  3-4-reconnect-grace-window: backlog
+  3-5-silent-re-enqueue-while-busy: backlog
+  3-6-persist-toggle-default-on: backlog
+  3-7-session-id-keepsake-on-persisted-chat-end: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-persisted-policy-store-and-single-writer-load: backlog
+  4-2-one-tap-block: backlog
+  4-3-block-list-view-and-unblock: backlog
+  4-4-auto-cooldown-between-just-matched-pairs: backlog
+  4-5-per-account-key-rate-limits: backlog
+  4-6-one-tap-report: backlog
+  4-7-backend-content-sanitization-links-length-frame-type: backlog
+  4-8-keyword-filter: backlog
+  4-9-maintainer-ban-cli: backlog
+  epic-4-retrospective: optional
+
+  epic-5: backlog
+  5-1-profile-edit-and-canonical-backend-copy: backlog
+  5-2-prefer-to-be-matched-with-hint-skippable-inert-in-v1: backlog
+  5-3-forget_me-and-local-data-deletion: backlog
+  5-4-idle-nudges: backlog
+  5-5-empty-queue-leave-a-note-for-the-next-person: backlog
+  epic-5-retrospective: optional
+
+  epic-6: backlog
+  6-1-env-only-configuration-and-self-host-image: backlog
+  6-2-fly-io-deployment: backlog
+  6-3-get-status-and-time-to-match-instrumentation: backlog
+  6-4-privacy-posture-and-open-source-documentation: backlog
+  6-5-license: backlog
+  epic-6-retrospective: optional
