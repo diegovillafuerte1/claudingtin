@@ -19,6 +19,12 @@
 # never a vacuous "OK" and never a bare abort. `go list` tolerates pure type
 # errors, so this is not a substitute for `go build` / `go vet` in the suite;
 # it checks the import graph, not compilation. Written for bash 3.2 (macOS).
+#
+# The module set checked is enumerated from go.work by scripts/workspace_modules.sh
+# — there is no hardcoded module list here. The direction rules below are still
+# keyed to the known module names (proto/backend/companion/plugin); a module
+# added to go.work under any other name makes this check FAIL LOUDLY until
+# matching rules are added for it here.
 set -euo pipefail
 
 command -v go >/dev/null || { echo 'check_deps: go toolchain not found' >&2; exit 1; }
@@ -66,8 +72,29 @@ thirdparty_used() {
 has() { printf '%s\n' "$1" | grep -qx "$2"; }
 
 # Resolve each module's dependency list once, failing loudly on a compile error.
+# The module set is the go.work-derived list shared with CI — strip the leading
+# `./` and trailing `/...` that workspace_modules.sh wraps each directory in.
 proto_deps=""; backend_deps=""; companion_deps=""; plugin_deps=""
-for m in proto backend companion plugin; do
+modules="$(bash "$repo_root/scripts/workspace_modules.sh" | sed 's#\./##g; s#/\.\.\.##g')"
+
+# The direction rules further down are keyed to these known module names. If
+# go.work grows a module with a different name, enumerate-then-silently-pass
+# would be a false OK — fail loudly instead until rules are written for it.
+known_module() {
+	local k
+	for k in proto backend companion plugin; do
+		[ "$1" = "$k" ] && return 0
+	done
+	return 1
+}
+for m in $modules; do
+	if ! known_module "$m"; then
+		echo "check_deps: no dependency-direction rules defined for module '$m' — add rules to this script" >&2
+		exit 1
+	fi
+done
+
+for m in $modules; do
 	if out="$(deps "$m")"; then
 		eval "${m}_deps=\$out"
 	else
@@ -101,7 +128,7 @@ check_no_sibling_beyond proto "$proto_deps"
 proto_tp="$(thirdparty_used "$proto_deps")"
 if [ -n "$proto_tp" ]; then
 	echo "FAIL: proto imports third-party packages:" >&2
-	echo "$proto_tp" | sed 's/^/  /' >&2
+	printf '%s\n' "$proto_tp" | sed 's/^/  /' >&2
 	fail=1
 fi
 

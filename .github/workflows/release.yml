@@ -1,0 +1,91 @@
+# release — cut shippable artifacts from a v* tag. Skeleton: structurally
+# complete, but only ever triggered by a real tag push (none exist yet — do not
+# create one just to exercise this).
+#
+# Trigger: `git push origin v0.1.0` (tag matching v*).
+#
+# What it does:
+#   - cross-builds the companion for darwin/arm64, darwin/amd64, linux/amd64 and
+#     windows/amd64 and attaches the four binaries to the GitHub Release for the tag
+#   - builds deploy/Dockerfile and pushes
+#     ghcr.io/diegovillafuerte1/claudingtin-backend tagged with the bare version
+#     (v0.1.0 -> 0.1.0) and `latest`
+#
+# MANUAL, NOT AUTOMATED HERE: refreshing plugin/bin/<os>-<arch>/ with the newly
+# built companion binaries is a separate reviewed commit. Each plugin release
+# pins exactly one companion binary version — see README "CI & releases".
+#
+# Third-party Actions are pinned to a released major-version tag: actions/checkout,
+# actions/setup-go, docker/login-action, docker/build-push-action, and
+# softprops/action-gh-release (the one GitHub-release action). Go version comes
+# from go.work via setup-go's go-version-file, never a literal.
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  binaries:
+    name: binaries (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - { goos: darwin, goarch: arm64, asset: companion-darwin-arm64 }
+          - { goos: darwin, goarch: amd64, asset: companion-darwin-amd64 }
+          - { goos: linux, goarch: amd64, asset: companion-linux-amd64 }
+          - { goos: windows, goarch: amd64, asset: companion-windows-amd64.exe }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+          cache: false
+      - name: build companion
+        shell: bash
+        run: |
+          mkdir -p dist
+          cd companion
+          CGO_ENABLED=0 GOOS='${{ matrix.goos }}' GOARCH='${{ matrix.goarch }}' \
+            go build -trimpath -o "../dist/${{ matrix.asset }}" .
+      - name: attach ${{ matrix.asset }} to the ${{ github.ref_name }} release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.asset }}
+          fail_on_unmatched_files: true
+
+  backend-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: derive version from the tag
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build and push the backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/diegovillafuerte1/claudingtin-backend:${{ steps.version.outputs.version }}
+            ghcr.io/diegovillafuerte1/claudingtin-backend:latest
