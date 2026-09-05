@@ -1,0 +1,31 @@
+# Compiled binaries / test artifacts
+*.exe
+*.test
+*.out
+/backend/serve
+/backend/ban
+/backend/reports
+/companion/companion
+
+# ...but committed cross-built companion binaries live here on purpose (Story 1.2)
+!plugin/bin/**
+
+# Go tooling
+/vendor/
+go.work.sum
+
+# Coverage / logs
+coverage.out
+*.cover
+*.log
+
+# Local backend data
+*.db
+*.sqlite
+
+# Editor / OS cruft
+.DS_Store
+.vscode/
+.idea/
+__debug_bin*
+*~
