@@ -1,0 +1,142 @@
+# ci — build, vet, test, lint, cross-build, and image-build the workspace.
+#
+# Runs on every pull request and on push to main. Third-party Actions are pinned
+# to a released major-version tag and limited to the set agreed for this repo:
+# actions/checkout, actions/setup-go, actions/upload-artifact, docker/login-action,
+# docker/build-push-action. The Go version always comes from go.work via
+# setup-go's go-version-file — never a literal here.
+#
+# No macOS test runner yet: the companion is cross-*compiled* for Darwin in the
+# cross-build job but not executed. Add a macos-latest entry to the test matrix
+# when Darwin-specific paths (fsnotify, tmux) land in Story 1.6.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+          cache: false
+      - name: build
+        shell: bash
+        run: |
+          mods=$(bash scripts/workspace_modules.sh) || { echo "::error::workspace_modules.sh failed"; exit 1; }
+          read -ra mod_args <<<"$mods"
+          [ "${#mod_args[@]}" -gt 0 ] || { echo "::error::no workspace modules resolved"; exit 1; }
+          go build "${mod_args[@]}"
+      - name: vet
+        shell: bash
+        run: |
+          mods=$(bash scripts/workspace_modules.sh) || { echo "::error::workspace_modules.sh failed"; exit 1; }
+          read -ra mod_args <<<"$mods"
+          [ "${#mod_args[@]}" -gt 0 ] || { echo "::error::no workspace modules resolved"; exit 1; }
+          go vet "${mod_args[@]}"
+      - name: test
+        shell: bash
+        run: |
+          mods=$(bash scripts/workspace_modules.sh) || { echo "::error::workspace_modules.sh failed"; exit 1; }
+          read -ra mod_args <<<"$mods"
+          [ "${#mod_args[@]}" -gt 0 ] || { echo "::error::no workspace modules resolved"; exit 1; }
+          go test "${mod_args[@]}"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+          cache: false
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needs to run on:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go work sync is a no-op
+        run: |
+          go work sync
+          git diff --exit-code
+      - name: shellcheck
+        shell: bash
+        run: |
+          # word-splitting the file list is intentional
+          # shellcheck disable=SC2046
+          shellcheck $(git ls-files '*.sh')
+      - name: dependency-direction check
+        run: bash scripts/check_deps.sh
+      - name: workspace-module guard
+        run: bash scripts/workspace_modules.sh --check
+      - name: guard self-tests
+        run: bash scripts/checks_test.sh
+
+  cross-build:
+    name: cross-build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: darwin, goarch: arm64, asset: companion-darwin-arm64 }
+          - { goos: darwin, goarch: amd64, asset: companion-darwin-amd64 }
+          - { goos: linux, goarch: amd64, asset: companion-linux-amd64 }
+          - { goos: windows, goarch: amd64, asset: companion-windows-amd64.exe }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+          cache: false
+      - name: build companion
+        shell: bash
+        run: |
+          mkdir -p dist
+          cd companion
+          CGO_ENABLED=0 GOOS='${{ matrix.goos }}' GOARCH='${{ matrix.goarch }}' \
+            go build -trimpath -o "../dist/${{ matrix.asset }}" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  backend-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build (push only on push to main)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: ghcr.io/diegovillafuerte1/claudingtin-backend:edge

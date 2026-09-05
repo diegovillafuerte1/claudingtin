@@ -25,3 +25,48 @@ go work sync                                                      # keep the wor
 bash scripts/check_deps.sh                                        # assert the dependency direction
 gofmt -l .                                                        # formatting (expect no output)
 ```
+
+The module list above is also emitted by `scripts/workspace_modules.sh` (so
+`go build $(bash scripts/workspace_modules.sh)` is equivalent). CI and
+`scripts/check_deps.sh` both enumerate the module set from `go.work` via that
+helper, so `go.work` is the single source of truth for *which* modules exist:
+`go build` / `go vet` / `go test` in CI pick up a new module automatically.
+`scripts/check_deps.sh` still needs a dependency-direction rule written for each
+module by name — a module added to `go.work` under an unknown name makes it fail
+loudly until rules are added. `scripts/workspace_modules.sh --check` fails if a
+`go.work` entry has no `go.mod`, or a top-level module is missing from `go.work`.
+
+## CI & releases
+
+Two GitHub Actions workflows live in `.github/workflows/`.
+
+**`ci.yml`** runs on every pull request and on push to `main`:
+
+- **test** — `go build` / `go vet` / `go test` the `go.work`-derived module set
+  on `ubuntu-latest` and `windows-latest`. (No macOS runner yet — the companion
+  is cross-*compiled* for Darwin but not exercised until Story 1.6 adds
+  Darwin-specific paths.)
+- **lint** — `gofmt -l .`, `go work sync` must be a no-op, `shellcheck` over
+  `scripts/*.sh` and `plugin/hooks/*.sh`, `scripts/check_deps.sh`
+  (dependency direction), and `scripts/workspace_modules.sh --check`
+  (every `go.work` entry has a `go.mod`, every top-level module is wired in).
+- **cross-build** — plain `go build` (`CGO_ENABLED=0`) of the companion for the
+  four targets `darwin/arm64`, `darwin/amd64`, `linux/amd64`, `windows/amd64`,
+  each uploaded as a build artifact.
+- **backend-image** — builds `deploy/Dockerfile`. On push to `main` it is pushed
+  to `ghcr.io/diegovillafuerte1/claudingtin-backend:edge`; on a pull request it
+  is built only — no registry login, no push — so fork PRs need no secrets.
+
+**`release.yml`** runs on a `v*` tag (e.g. `git push origin v0.1.0`):
+
+- attaches the four companion binaries — `companion-darwin-arm64`,
+  `companion-darwin-amd64`, `companion-linux-amd64`,
+  `companion-windows-amd64.exe` — to the GitHub Release for the tag;
+- pushes the backend image to `ghcr.io/diegovillafuerte1/claudingtin-backend`
+  tagged with the bare version (`v0.1.0` → `0.1.0`) and `latest`.
+
+### Manual step: refreshing `plugin/bin/`
+
+CI never commits binaries. After a release, copy the freshly built companion
+binaries into `plugin/bin/<os>-<arch>/` and commit them as a separate reviewed
+change. Each plugin release pins exactly one companion binary version.
