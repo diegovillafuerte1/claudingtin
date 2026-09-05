@@ -8,12 +8,12 @@ This repository is a Go workspace (`go.work`) over four modules — `proto`, `ba
 |--------|------|-------------|------------|------|
 | `proto` | `./proto` | `github.com/diegovillafuerte1/claudingtin/proto` | — (stdlib only) | Wire contract: the `{type, v, ...payload}` envelope, `PROTOCOL_VERSION`, one struct + `snake_case` discriminator per v1 message, and `Encode`/`Decode`. |
 | `backend` | `./backend` | `github.com/diegovillafuerte1/claudingtin/backend` | `proto` | Server: `cmd/serve` (websocket + `GET /status`), `cmd/ban`, `cmd/reports`. Minimal in Epic 1. |
-| `companion` | `./companion` | `github.com/diegovillafuerte1/claudingtin/companion` | `proto` | Local TUI that tails the Claude Code transcript and speaks `ready`/`busy` over the websocket. |
+| `companion` | `./companion` | `github.com/diegovillafuerte1/claudingtin/companion` | `proto`, `fsnotify` | Local TUI that tails the Claude Code transcript and speaks `ready`/`busy` over the websocket. Transcript turn-boundary parser + fsnotify tailer live in `internal/transcript`; the format it targets is pinned in [`docs/transcript-format.md`](docs/transcript-format.md). |
 | `plugin` | `./plugin` | `github.com/diegovillafuerte1/claudingtin/plugin` | — (execs the companion by path) | `cmd/session-start` launcher and the `hooks/` SessionStart script. Committed cross-built companion binaries live under `bin/<os>-<arch>/`. |
 
 ## Development
 
-Requires Go 1.27.x. No third-party dependencies and no network access are needed to build or test.
+Requires Go 1.27.x. The only third-party dependency is `github.com/fsnotify/fsnotify` (pinned `v1.10.1`, used by the companion's transcript tailer); `proto`, `backend`, and `plugin` stay stdlib-only. The first build needs module downloads (or a primed module cache) to fetch it; `companion/go.sum` keeps that reproducible. After that, no network access is needed to build or test.
 
 From the repository root (Go's `./...` does not span workspace modules on its own, so name them):
 

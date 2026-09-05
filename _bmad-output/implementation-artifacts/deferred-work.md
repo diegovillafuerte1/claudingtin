@@ -49,3 +49,35 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-2-ci-cross-build-and-release-skeleton.md`
   summary: Repo-wide hygiene — `-race` on `go test` in CI; a per-module `go mod tidy` / `go mod verify` check; version stamping (`-ldflags -X` or `-buildvcs`) for the companion and `serve`; `.gitattributes` enforcing LF and add `dist/` to `.gitignore`; use `${{ github.repository_owner }}` for the GHCR image name instead of the hardcoded account (revisit the spec constraint that locks the literal name); enable the Go build cache in CI once a `go.sum` exists.
   evidence: blind-hunter. None are correctness bugs today; all are standard once the project has dependencies and contributors.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-3-transcript-format-spike-and-defensive-parser.md`
+  summary: Transcript parser fails unsafe on an un-enumerated terminal `stop_reason` or a turn whose final line is lost (CLI crash / mid-write truncation) — `Parser` stays `StateInTurn` with no timeout or backstop, the opposite of its "unknown line → degrade quietly" stance. Consider a stuck-turn watchdog (likely in Story 1.6's ready/busy layer) or treating any non-`tool_use`/`pause_turn` non-empty `stop_reason` as terminal.
+  evidence: edge-case-hunter + blind-hunter. `terminalStopReasons` is a closed allowlist; `refusal` was already missing (patched). No path closes a turn except a known terminal reason or the next turn-start.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-3-transcript-format-spike-and-defensive-parser.md`
+  summary: Mid-turn rotation/truncation drops an open turn silently — `tailer.reset()` wipes parser state while `State() == StateInTurn` without signalling the consumer; recovery depends on the replacement file replaying the in-progress turn. Consider a synthetic `TurnEnd` (or a distinct reset event) on mid-turn reset.
+  evidence: edge-case-hunter. `reset()` is called from both the truncation branch and `reopen()`; neither checks in-turn state.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-3-transcript-format-spike-and-defensive-parser.md`
+  summary: `readAppend` seeds via `io.ReadAll` (whole file into memory on attach) and only treats `size < offset` as truncation — a same-path in-place rewrite that keeps or grows the size is undetected and makes the tailer `Seek` into the middle of fresh content (parser self-resyncs at the next newline but may miss/duplicate events). Consider seeking near EOF on large initial files and an inode/ctime identity check for rewrites.
+  evidence: edge-case-hunter + blind-hunter. Real transcripts observed up to ~2.3 MB today; Claude Code compaction currently rotates by rename (covered), so in-place rewrite is low-probability.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-3-transcript-format-spike-and-defensive-parser.md`
+  summary: `tailer.partial` line buffer is unbounded — a newline-free file dropped at the watched path grows memory without limit via `append`. Add a max-line-size guard that resynchronises past an over-long line.
+  evidence: edge-case-hunter + blind-hunter. Requires a malformed/wrong file at the path; transcript lines are large but bounded in practice.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-3-transcript-format-spike-and-defensive-parser.md`
+  summary: `rawLine` is unmarshalled as one struct, so any single-field JSON type drift in a future Claude Code version (e.g. numeric `timestamp`, non-object `message`) discards the whole line and silently stops all turn detection. Consider decoding the mapped fields individually via `json.RawMessage`.
+  evidence: edge-case-hunter. No such drift observed across versions 2.1.250–2.1.261; speculative but the failure mode is total and silent.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-3-transcript-format-spike-and-defensive-parser.md`
+  summary: `reopen()` window is fixed (~5s, no backoff/jitter) and terminal — once exhausted the tailer is deaf for the rest of the session with no auto-restart, only an error on `Errors`. Consider a longer/configurable window or a re-arm path.
+  evidence: blind-hunter. The I/O matrix specs "retries exhausted → error on the error channel, no panic", so terminal-after-~5s is current intended behaviour; a slow compaction could exceed it.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-3-transcript-format-spike-and-defensive-parser.md`
+  summary: fsnotify event-name match is exact (`filepath.Clean(ev.Name) != t.path`); on case-insensitive filesystems (macOS/Windows) a case difference between the hook-supplied path and the on-disk name would drop every event, silently degrading to the 1s poll backstop. Consider a case-folded comparison on those platforms (weighed against matching case-only-different siblings).
+  evidence: edge-case-hunter. Low probability — the Story 1.7 hook passes the real path — but the degradation is silent.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-3-transcript-format-spike-and-defensive-parser.md`
+  summary: No `macos-latest` in the CI `test` matrix even though the kqueue-backed fsnotify tailer and its macOS `EvalSymlinks` workaround ship in this story — macOS rename/rotation/symlink behaviour is exercised nowhere in CI. Revisit the `ci.yml` header comment that defers the macOS runner to Story 1.6.
+  evidence: verification-gap + blind-hunter. Spec listed adding `macos-latest` under "Ask First"; the implementer correctly stayed in-bounds, so this is surfaced for a deliberate decision.

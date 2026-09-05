@@ -1,0 +1,19 @@
+{"type":"atis-latch","atis":"","sessionId":"S"}
+{"type":"bridge-session","sessionId":"S","bridgeSessionId":"B","lastSequenceNum":0}
+{"type":"mode","mode":"","sessionId":"S"}
+{"type":"permission-mode","permissionMode":"","sessionId":"S"}
+{"type":"last-prompt","lastPrompt":"","leafUuid":"x","sessionId":"S"}
+{"type":"ai-title","aiTitle":"","sessionId":"S"}
+{"type":"agent-name","sessionId":"S"}
+{"type":"queue-operation","operation":"","timestamp":"2026-09-05T16:45:00.000Z","sessionId":"S","content":""}
+{"type":"cost-state","sessionId":"S","totalCostUSD":0}
+{"type":"file-history-snapshot","messageId":"x","snapshot":{"messageId":"x","trackedFileBackups":{},"timestamp":"2026-09-05T16:45:00.000Z"},"isSnapshotUpdate":false}
+{"type":"attachment","parentUuid":"x","isSidechain":false,"attachment":{"type":"new_directory"},"uuid":"at1","timestamp":"2026-09-05T16:45:00.000Z"}
+{"type":"system","parentUuid":"x","isSidechain":false,"subtype":"","timestamp":"2026-09-05T16:45:00.000Z","uuid":"sy1","isMeta":false}
+{"type":"user","parentUuid":"x","isSidechain":false,"isMeta":true,"turnCompanion":true,"message":{"role":"user","content":[{"type":"text"}]},"uuid":"um1","timestamp":"2026-09-05T16:45:00.000Z"}
+{"type":"user","parentUuid":"x","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t9","content":""}]},"uuid":"um2","timestamp":"2026-09-05T16:45:00.000Z"}
+{"type":"user","parentUuid":"x","isSidechain":true,"message":{"role":"user","content":""},"uuid":"um3","timestamp":"2026-09-05T16:45:00.000Z"}
+{"type":"assistant","parentUuid":"x","isSidechain":true,"message":{"role":"assistant","id":"sc1","content":[{"type":"text"}],"stop_reason":"end_turn"},"uuid":"sa1","timestamp":"2026-09-05T16:45:00.000Z"}
+{"type":"pr-link","sessionId":"S","prUrl":""}
+{"type":"future-unknown-type-not-yet-invented","some":"field"}
+{this is not valid json at all

@@ -1,0 +1,3 @@
+{"type":"user","parentUuid":null,"isSidechain":false,"message":{"role":"user","content":""},"uuid":"u1","timestamp":"2026-09-05T16:45:00.000Z","origin":{"kind":"human"},"promptSource":"typed"}
+{"type":"assistant","parentUuid":"u1","isSidechain":false,"message":{"role":"assistant","id":"m1","content":[{"type":"text"}],"stop_reason":"end_turn"},"uuid":"a1","timestamp":"2026-09-05T16:45:03.000Z"}
+{"type":"assistant","parentUuid":"u1","isSidechain":false,"message":{"role":"assistant","id":"m2","content":[{"type":"thin

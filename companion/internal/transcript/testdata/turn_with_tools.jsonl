@@ -1,0 +1,7 @@
+{"type":"mode","mode":"","sessionId":"S"}
+{"type":"user","parentUuid":null,"isSidechain":false,"message":{"role":"user","content":""},"uuid":"u1","timestamp":"2026-09-05T16:45:00.000Z","origin":{"kind":"human"},"promptSource":"typed"}
+{"type":"assistant","parentUuid":"u1","isSidechain":false,"message":{"role":"assistant","id":"m1","content":[{"type":"thinking"},{"type":"tool_use"}],"stop_reason":"tool_use"},"uuid":"a1","timestamp":"2026-09-05T16:45:01.000Z"}
+{"type":"user","parentUuid":"a1","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":""}]},"uuid":"u2","timestamp":"2026-09-05T16:45:02.000Z"}
+{"type":"assistant","parentUuid":"u2","isSidechain":false,"message":{"role":"assistant","id":"m2","content":[{"type":"tool_use"}],"stop_reason":"tool_use"},"uuid":"a2","timestamp":"2026-09-05T16:45:03.000Z"}
+{"type":"user","parentUuid":"a2","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"","is_error":false}]},"uuid":"u3","timestamp":"2026-09-05T16:45:04.000Z"}
+{"type":"assistant","parentUuid":"u3","isSidechain":false,"message":{"role":"assistant","id":"m3","content":[{"type":"text"}],"stop_reason":"end_turn"},"uuid":"a3","timestamp":"2026-09-05T16:45:05.000Z"}
