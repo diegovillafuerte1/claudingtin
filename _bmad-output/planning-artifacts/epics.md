@@ -315,7 +315,9 @@ So that a tagged release produces the binaries the plugin ships and a runnable s
 
 **Given** a pull request
 **When** the workflow runs
-**Then** the companion compiles for macOS arm64, macOS x64, Linux x64, and Windows x64, the backend container image builds, and all tests run — including a `modernc.org/sqlite` build+open check on Windows.
+**Then** the companion compiles for macOS arm64, macOS x64, Linux x64, and Windows x64, the backend container image builds, and all tests run.
+
+> _Deferred:_ the `modernc.org/sqlite` build+open check on Windows named in the original AC is deferred to the story that first imports `modernc.org/sqlite` (Story 1.4 / Epic 4) — the dependency does not exist in Epic 1. See `spec-1-2-ci-cross-build-and-release-skeleton.md` and `epic-1-retro-2026-09-06.md` (finding F2).
 
 **Given** a version tag
 **When** the release workflow runs

@@ -34,7 +34,6 @@ import (
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/identity"
 	runner "github.com/diegovillafuerte1/claudingtin/companion/internal/run"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/safety"
-	"github.com/diegovillafuerte1/claudingtin/proto"
 )
 
 // defaultServerURL is the compiled-in fallback. It is a localhost placeholder
@@ -46,10 +45,6 @@ const defaultServerURL = "ws://127.0.0.1:8080/ws"
 var errUsage = errors.New("usage: companion <transcript-path> <config-dir> <server-url>")
 
 func main() {
-	// Keep the proto edge real for scripts/check_deps.sh even though runner
-	// already imports it transitively.
-	_ = proto.PROTOCOL_VERSION
-
 	os.Exit(run(os.Args[1:], os.Getenv, os.Stdin, os.Stdout, os.Stderr))
 }
 
