@@ -9,7 +9,7 @@ This repository is a Go workspace (`go.work`) over four modules — `proto`, `ba
 | `proto` | `./proto` | `github.com/diegovillafuerte1/claudingtin/proto` | — (stdlib only) | Wire contract: the `{type, v, ...payload}` envelope, `PROTOCOL_VERSION`, one struct + `snake_case` discriminator per v1 message, and `Encode`/`Decode`. |
 | `backend` | `./backend` | `github.com/diegovillafuerte1/claudingtin/backend` | `proto` | Server: `cmd/serve` (websocket + `GET /status`), `cmd/ban`, `cmd/reports`. Minimal in Epic 1. |
 | `companion` | `./companion` | `github.com/diegovillafuerte1/claudingtin/companion` | `proto`, `fsnotify`, `coder/websocket` | Local TUI that tails the Claude Code transcript and speaks `ready`/`busy` over the websocket. Transcript turn-boundary parser + fsnotify tailer live in `internal/transcript`; the format it targets is pinned in [`docs/transcript-format.md`](docs/transcript-format.md). |
-| `plugin` | `./plugin` | `github.com/diegovillafuerte1/claudingtin/plugin` | — (execs the companion by path) | `cmd/session-start` launcher and the `hooks/` SessionStart script. Committed cross-built companion binaries live under `bin/<os>-<arch>/`. |
+| `plugin` | `./plugin` | `github.com/diegovillafuerte1/claudingtin/plugin` | — (execs the companion by path) | `cmd/session-start` fail-open launcher plus the `hooks/session-start.sh` arch-dispatch wrapper, registered by `.claude-plugin/plugin.json` → `hooks/hooks.json` (`SessionStart`, `matcher: startup\|resume`). Committed cross-built binaries — the per-platform `session-start` launcher beside the pinned `companion` — live under `bin/<os>-<arch>/`. |
 
 ## Backend
 
@@ -82,8 +82,9 @@ deliberately *outside* the plugin's own directory, so reinstalling or updating
 the plugin keeps the same key. This file is managed by the companion — don't
 hand-edit it; a hand-written non-canonical or uppercase UUID is treated as
 corrupt and replaced. The package writes no logs and the key appears in no
-returned error or panic message. `internal/identity` owns this; the config-dir
-path is passed to the companion as a launch argument in a later story.
+returned error or panic message. `internal/identity` owns this. The
+`session-start` launcher passes the companion an empty config-dir argument, so
+the companion resolves this path itself via `identity.DefaultConfigDir()`.
 
 ## Development
 
@@ -125,9 +126,10 @@ Two GitHub Actions workflows live in `.github/workflows/`.
   `scripts/*.sh` and `plugin/hooks/*.sh`, `scripts/check_deps.sh`
   (dependency direction), and `scripts/workspace_modules.sh --check`
   (every `go.work` entry has a `go.mod`, every top-level module is wired in).
-- **cross-build** — plain `go build` (`CGO_ENABLED=0`) of the companion for the
-  four targets `darwin/arm64`, `darwin/amd64`, `linux/amd64`, `windows/amd64`,
-  each uploaded as a build artifact.
+- **cross-build** — plain `go build` (`CGO_ENABLED=0`) of the companion **and the
+  `session-start` launcher** for the four targets `darwin/arm64`, `darwin/amd64`,
+  `linux/amd64`, `windows/amd64`, each uploaded as a build artifact
+  (`companion-<os>-<arch>` and `session-start-<os>-<arch>`).
 - **backend-image** — builds `deploy/Dockerfile`. On push to `main` it is pushed
   to `ghcr.io/diegovillafuerte1/claudingtin-backend:edge`; on a pull request it
   is built only — no registry login, no push — so fork PRs need no secrets.
@@ -136,12 +138,28 @@ Two GitHub Actions workflows live in `.github/workflows/`.
 
 - attaches the four companion binaries — `companion-darwin-arm64`,
   `companion-darwin-amd64`, `companion-linux-amd64`,
-  `companion-windows-amd64.exe` — to the GitHub Release for the tag;
+  `companion-windows-amd64.exe` — and the four matching `session-start-<os>-<arch>`
+  launcher binaries to the GitHub Release for the tag;
 - pushes the backend image to `ghcr.io/diegovillafuerte1/claudingtin-backend`
   tagged with the bare version (`v0.1.0` → `0.1.0`) and `latest`.
 
 ### Manual step: refreshing `plugin/bin/`
 
-CI never commits binaries. After a release, copy the freshly built companion
-binaries into `plugin/bin/<os>-<arch>/` and commit them as a separate reviewed
-change. Each plugin release pins exactly one companion binary version.
+CI never commits binaries. After a release, copy the freshly built binaries into
+`plugin/bin/<os>-<arch>/` — the `session-start` launcher beside the `companion`
+for each target — and commit them as a separate reviewed change. Each plugin
+release pins exactly one version of both binaries.
+
+The `SessionStart` hook chain is: Claude Code reads
+`plugin/.claude-plugin/plugin.json` → `hooks/hooks.json` (one `SessionStart`
+entry, `matcher: "startup|resume"`, `timeout: 10`) → runs
+`hooks/session-start.sh`, which maps the host to `<os>-<arch>` and runs
+`bin/<os>-<arch>/session-start`. The hook fires only on session `startup` and
+`resume`; `clear` and `compact` keep using the companion already launched for
+that session. The launcher reads the hook's stdin JSON, takes a per-`session_id`
+lock in the temp dir (one companion per session), and spawns `companion
+<transcript-path> "" ""` detached without waiting. Set `CLAUDINGTIN_DISABLE` to
+`1`/`true`/`yes`/`on` to disable the launch entirely. Every other path — opt-out,
+malformed input, missing or unusable binary, spawn error, even a panic — still
+exits `0` with nothing on stdout, so a broken or absent companion never blocks
+the Claude Code session.

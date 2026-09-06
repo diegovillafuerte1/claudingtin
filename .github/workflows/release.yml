@@ -5,8 +5,9 @@
 # Trigger: `git push origin v0.1.0` (tag matching v*).
 #
 # What it does:
-#   - cross-builds the companion for darwin/arm64, darwin/amd64, linux/amd64 and
-#     windows/amd64 and attaches the four binaries to the GitHub Release for the tag
+#   - cross-builds the companion and the session-start launcher for darwin/arm64,
+#     darwin/amd64, linux/amd64 and windows/amd64 and attaches all eight binaries
+#     to the GitHub Release for the tag
 #   - builds deploy/Dockerfile and pushes
 #     ghcr.io/diegovillafuerte1/claudingtin-backend tagged with the bare version
 #     (v0.1.0 -> 0.1.0) and `latest`
@@ -40,10 +41,10 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - { goos: darwin, goarch: arm64, asset: companion-darwin-arm64 }
-          - { goos: darwin, goarch: amd64, asset: companion-darwin-amd64 }
-          - { goos: linux, goarch: amd64, asset: companion-linux-amd64 }
-          - { goos: windows, goarch: amd64, asset: companion-windows-amd64.exe }
+          - { goos: darwin, goarch: arm64, asset: companion-darwin-arm64, launcher: session-start-darwin-arm64 }
+          - { goos: darwin, goarch: amd64, asset: companion-darwin-amd64, launcher: session-start-darwin-amd64 }
+          - { goos: linux, goarch: amd64, asset: companion-linux-amd64, launcher: session-start-linux-amd64 }
+          - { goos: windows, goarch: amd64, asset: companion-windows-amd64.exe, launcher: session-start-windows-amd64.exe }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -57,10 +58,19 @@ jobs:
           cd companion
           CGO_ENABLED=0 GOOS='${{ matrix.goos }}' GOARCH='${{ matrix.goarch }}' \
             go build -trimpath -o "../dist/${{ matrix.asset }}" .
-      - name: attach ${{ matrix.asset }} to the ${{ github.ref_name }} release
+      - name: build session-start launcher
+        shell: bash
+        run: |
+          mkdir -p dist
+          cd plugin
+          CGO_ENABLED=0 GOOS='${{ matrix.goos }}' GOARCH='${{ matrix.goarch }}' \
+            go build -trimpath -o "../dist/${{ matrix.launcher }}" ./cmd/session-start
+      - name: attach ${{ matrix.asset }} and ${{ matrix.launcher }} to the ${{ github.ref_name }} release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.asset }}
+          files: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.launcher }}
           fail_on_unmatched_files: true
 
   backend-image:

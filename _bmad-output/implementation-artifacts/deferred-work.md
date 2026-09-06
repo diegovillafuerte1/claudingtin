@@ -137,3 +137,23 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-6-companion-launch-transcript-watch-ready-busy-over-the-websoc.md`
   summary: Inbound `proto.Error` frames are silently discarded by `wsclient.serve` (only `please_update` / `session_ended` are recognised). If a future backend rejects the `hello` with an `error` frame + normal close, the companion reconnects forever re-sending the same rejected hello with zero operator feedback. Unreachable in Epic 1 (the only `error`-on-first-frame paths are bad/empty-key frames, which `identity.Load` + the encoder preclude), and the spec Code Map explicitly says "all other inbound frames discarded".
   evidence: blind-hunter + edge-case-hunter. Becomes relevant when later epics add backend-side rejection paths; fix is to surface a scrubbed `Code`/`Msg` line to stderr while still honouring "an error is never a transport close".
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-7-sessionstart-hook-fail-open-launch.md`
+  summary: The per-session_id lock file (`<tmp>/claudingtin-<id>.lock`) has no TTL, liveness check, or cleanup path — it accumulates one file per session in a temp dir that is not reliably reaped (macOS `/var/folders/...`), and a companion that crashed on startup or a `cmd.Start()` that errored is never relaunched for that `session_id` again (a later `resume` finds the lock held and silently no-ops).
+  evidence: blind-hunter + edge-case-hunter + verification-gap. The spec Design Notes explicitly accept the stale-lock tradeoff and flag "a later refinement"; the frozen I/O matrix codifies "lock left in place" on spawn error. Real but bounded (a fresh Claude Code session gets a fresh id). Fix candidates: record the child PID in the lock and relaunch when not alive, a mtime-based TTL, or release the lock on a pre-start failure.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-7-sessionstart-hook-fail-open-launch.md`
+  summary: `parse` does `io.ReadAll` on the hook stdin with no read deadline. A Claude Code that opens the hook's stdin but does not send EOF promptly makes the launcher block until the `hooks.json` `timeout: 10`, at which point Claude Code kills the hook and starts the session anyway — a up-to-10s delay in the companion launching (and a brief SessionStart stall), not a hard block.
+  evidence: edge-case-hunter. Trigger is effectively a Claude Code bug; `timeout: 10` is the designed backstop. Consider reading stdin in a goroutine with a short timer and proceeding with whatever arrived.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-7-sessionstart-hook-fail-open-launch.md`
+  summary: There is no native-Windows hook entry. `hooks/hooks.json` registers only the POSIX `hooks/session-start.sh`; a Windows Claude Code without a POSIX `sh` on PATH (native PowerShell, no Git Bash) gets a silent no-op even though a working `session-start-windows-amd64.exe` is committed and shipped. Consider a `.cmd`/`.ps1` wrapper plus a Windows-matched `hooks.json` entry.
+  evidence: blind-hunter + edge-case-hunter. The spec's Design Notes name native-Windows-without-sh an accepted degradation, so closing it is a scope decision, not a patch. (Story 1.7 does add MINGW/MSYS/CYGWIN mapping to the wrapper so Git Bash users are covered.)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-7-sessionstart-hook-fail-open-launch.md`
+  summary: No CI guard that `plugin/bin/<target>/session-start` exists alongside every `plugin/bin/<target>/companion` (and vice versa). A partial manual binary refresh — the documented post-release step — would ship with a missing launcher or companion for some target and the wrapper would just hit `[ -x ] || exit 0` silently.
+  evidence: blind-hunter. Pre-existing class of gap (there is no committed-binary completeness check for the companion either; `plugin/bin/` currently holds only `.gitkeep`). Cheap to add once the first release populates `plugin/bin/`.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-7-sessionstart-hook-fail-open-launch.md`
+  summary: `pluginRoot`'s `os.Executable()` fallback does not `filepath.EvalSymlinks` the launcher path before walking three directories up. A plugin install symlinked into place (common under `~/.claude/plugins`) that also lacks `${CLAUDE_PLUGIN_ROOT}` in the hook env would resolve `../../..` against the wrong tree and not find the companion.
+  evidence: blind-hunter. Low probability — Claude Code sets `${CLAUDE_PLUGIN_ROOT}` (checked first after the Story 1.7 patch) and Linux `os.Executable()` already resolves `/proc/self/exe`; the exposure is macOS + env-unset + symlinked install.
