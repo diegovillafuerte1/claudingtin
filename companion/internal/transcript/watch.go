@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+
+	"github.com/diegovillafuerte1/claudingtin/companion/internal/fsretry"
 )
 
 // Tuning knobs for the tailer. Package-level vars, not consts, only so the tests
@@ -192,7 +194,11 @@ func (t *tailer) run() {
 // errGone. Any other open/read error is returned as-is and is treated as
 // transient by the caller.
 func (t *tailer) readAppend() error {
-	f, err := os.Open(t.path)
+	// fsretry.Open, not os.Open: on Windows, opening the transcript while it is
+	// being atomically rotated (rename of a fresh file over this path) fails
+	// transiently with ERROR_SHARING_VIOLATION; a bare open makes rotation
+	// recovery flaky there.
+	f, err := fsretry.Open(t.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return errGone
