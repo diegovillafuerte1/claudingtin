@@ -3,12 +3,40 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+
+	"github.com/diegovillafuerte1/claudingtin/proto"
 )
+
+// lockedBuf is a concurrency-safe io.Writer for the tests that run() in a
+// goroutine while the test body inspects the captured output.
+type lockedBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
 
 func TestResolve(t *testing.T) {
 	cases := []struct {
@@ -190,9 +218,11 @@ var uuidLike = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-
 func TestRunExitCodes(t *testing.T) {
 	noEnv := func(string) string { return "" }
 
+	noStdin := func() io.Reader { return strings.NewReader("") }
+
 	t.Run("wrong arg count exits 2", func(t *testing.T) {
 		var out, errb bytes.Buffer
-		if code := run([]string{"only-one-arg"}, noEnv, &out, &errb); code != 2 {
+		if code := run([]string{"only-one-arg"}, noEnv, noStdin(), &out, &errb); code != 2 {
 			t.Fatalf("exit = %d, want 2", code)
 		}
 		if !strings.Contains(errb.String(), "usage:") {
@@ -202,12 +232,42 @@ func TestRunExitCodes(t *testing.T) {
 
 	t.Run("invalid server-url exits 1", func(t *testing.T) {
 		var out, errb bytes.Buffer
-		code := run([]string{"/tmp/t", t.TempDir(), "http://nope/ws"}, noEnv, &out, &errb)
+		code := run([]string{"/tmp/t", t.TempDir(), "http://nope/ws"}, noEnv, noStdin(), &out, &errb)
 		if code != 1 {
 			t.Fatalf("exit = %d, want 1", code)
 		}
 		if errb.Len() == 0 {
 			t.Fatal("want an error on stderr")
+		}
+	})
+
+	t.Run("CLAUDINGTIN_SAFETY_REVIEW reprints the screen and exits 0 with no args", func(t *testing.T) {
+		env := func(k string) string {
+			if k == "CLAUDINGTIN_SAFETY_REVIEW" {
+				return "1"
+			}
+			return ""
+		}
+		var out, errb bytes.Buffer
+		// No positional args at all: the review path runs before resolve and
+		// must not depend on well-formed arguments.
+		code := run(nil, env, noStdin(), &out, &errb)
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0; stderr=%q", code, errb.String())
+		}
+		if !strings.Contains(out.String(), "18 or older") {
+			t.Fatalf("stdout = %q, want the first-run screen", out.String())
+		}
+		if errb.Len() != 0 {
+			t.Fatalf("stderr = %q, want nothing", errb.String())
+		}
+		if uuidLike.MatchString(out.String()) {
+			t.Fatalf("screen output carries key-shaped material: %q", out.String())
+		}
+		// Fprint, not Fprintln: Screen() already ends in "\n", so there must be
+		// no trailing blank line.
+		if strings.HasSuffix(out.String(), "\n\n") {
+			t.Fatalf("screen output has a stray trailing blank line:\n%q", out.String())
 		}
 	})
 
@@ -222,7 +282,7 @@ func TestRunExitCodes(t *testing.T) {
 		badConfigDir := filepath.Join(notADir, "config")
 
 		var out, errb bytes.Buffer
-		code := run([]string{"/tmp/t", badConfigDir, "ws://127.0.0.1:8080/ws"}, noEnv, &out, &errb)
+		code := run([]string{"/tmp/t", badConfigDir, "ws://127.0.0.1:8080/ws"}, noEnv, noStdin(), &out, &errb)
 		if code == 0 {
 			t.Fatalf("exit = 0, want non-zero on identity.Load failure; stderr=%q", errb.String())
 		}
@@ -233,4 +293,61 @@ func TestRunExitCodes(t *testing.T) {
 			t.Fatalf("output carries UUID-like key material: out=%q err=%q", out.String(), errb.String())
 		}
 	})
+}
+
+// TestRunFullAcceptWritesAck drives run() end to end on the accept path: real
+// temp transcript, a live coder/websocket server, a temp config dir, and
+// stdin = "yes\n". It locks the cfg.In / cfg.ConfigDir wiring — run() must
+// record <configDir>/safety-ack and connect. The server returns session_ended
+// right after the first frame so run() exits 0 without a real signal.
+func TestRunFullAcceptWritesAck(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		// Send session_ended straight away, then keep draining so the client's
+		// read pump stays healthy until it acts on it — mirrors the run package's
+		// own e2e recorder.
+		b, _ := proto.Encode(proto.SessionEnded{})
+		_ = c.Write(r.Context(), websocket.MessageText, b)
+		for {
+			if _, _, err := c.Read(r.Context()); err != nil {
+				return
+			}
+		}
+	}))
+	defer ts.Close()
+
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "session.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("seed transcript: %v", err)
+	}
+	cfgDir := t.TempDir()
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+
+	var out, errb lockedBuf
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{transcriptPath, cfgDir, wsURL},
+			func(string) string { return "" }, strings.NewReader("yes\n"), &out, &errb)
+	}()
+
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("run exit = %d, want 0; stderr=%q", code, errb.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("run did not return; stdout=%q stderr=%q", out.String(), errb.String())
+	}
+
+	if _, err := os.Stat(filepath.Join(cfgDir, "safety-ack")); err != nil {
+		t.Fatalf("safety-ack not written after a full accept: %v", err)
+	}
+	if !strings.Contains(out.String(), "18 or older") {
+		t.Fatalf("stdout = %q, want the first-run screen", out.String())
+	}
 }

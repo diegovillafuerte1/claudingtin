@@ -19,6 +19,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/diegovillafuerte1/claudingtin/companion/internal/safety"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/statusline"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/transcript"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/wsclient"
@@ -38,25 +39,40 @@ var watchDrainWait = 100 * time.Millisecond
 // delivered a specific error. It maps to a non-zero exit.
 var errWatchStopped = errors.New("transcript watch stopped")
 
-// Config is everything Run needs. Out and Err default to os.Stdout / os.Stderr
-// when nil.
+// Config is everything Run needs. In, Out and Err default to os.Stdin /
+// os.Stdout / os.Stderr when nil.
 type Config struct {
 	TranscriptPath string
 	ServerURL      string
 	AccountKey     string
-	Out            io.Writer
-	Err            io.Writer
+	// ConfigDir is the resolved OS-config directory (the same one identity uses).
+	// The first-run acknowledgement lives at <ConfigDir>/safety-ack.
+	ConfigDir string
+	// In is the reader the first-run gate reads its one line from.
+	In  io.Reader
+	Out io.Writer
+	Err io.Writer
 }
 
 // Run starts the transcript watch and the websocket client and blocks until a
 // terminal condition. A nil return is a clean exit (code 0); a non-nil error is
 // a fatal one (non-zero exit). The account key never appears in the error.
+//
+// cfg.ConfigDir is required: it is where the first-run acknowledgement
+// (<ConfigDir>/safety-ack) is read and written. Run returns an error if it is
+// empty rather than touching a relative path in the process working directory.
 func Run(ctx context.Context, cfg Config) error {
+	if cfg.In == nil {
+		cfg.In = os.Stdin
+	}
 	if cfg.Out == nil {
 		cfg.Out = os.Stdout
 	}
 	if cfg.Err == nil {
 		cfg.Err = os.Stderr
+	}
+	if cfg.ConfigDir == "" {
+		return errors.New("run: ConfigDir is required")
 	}
 
 	// Every terminal path (session_ended, please_update, a fatal watch error,
@@ -65,6 +81,28 @@ func Run(ctx context.Context, cfg Config) error {
 	// derived context cancelled on return does exactly that.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// The first-run precondition: nothing is watched and no socket is dialed
+	// until the local 18+/safety screen is cleared.
+	switch outcome, err := safety.Gate(ctx, cfg.In, cfg.Out, cfg.ConfigDir); {
+	case err != nil:
+		return fmt.Errorf("first-run gate: %w", err)
+	case outcome == safety.OutcomeAccepted, outcome == safety.OutcomeAlreadyAccepted:
+		// Cleared — fall through to the watch + client path below.
+	case outcome == safety.OutcomeDeclined:
+		// Stay running, connected to nothing, until the session ends. Nothing
+		// was recorded, so the screen returns next run.
+		statusline.New(cfg.Out).Show(statusline.PhaseInert)
+		<-ctx.Done()
+		return nil
+	case outcome == safety.OutcomeAborted:
+		// ctx cancelled while waiting for the line — a clean exit.
+		return nil
+	default:
+		// This switch guards a safety gate: an unrecognised Outcome must fail
+		// closed, never fall through to "connect".
+		return fmt.Errorf("first-run gate: unexpected outcome %d", outcome)
+	}
 
 	w, err := transcript.Watch(ctx, cfg.TranscriptPath)
 	if err != nil {

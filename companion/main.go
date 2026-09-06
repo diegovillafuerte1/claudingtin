@@ -6,9 +6,19 @@
 // writes only its own status line to stdout and diagnostics to stderr; it never
 // touches a Claude Code stream and renders no chat UI.
 //
-// Exit codes: 0 clean exit (context cancelled, the peer ended the session, or
-// the server asked for an update and the process was then signalled); 2 bad
-// arguments; 1 any startup or runtime failure.
+// First-run gate: before any of that, a local, network-free 18+/safety screen
+// (internal/safety) is printed to stdout and one line is read from stdin. Only
+// an affirmative answer records an acknowledgement at <config-dir>/safety-ack
+// and lets the connection proceed. A decline (or no input) records nothing and
+// re-presents the screen next run: the process keeps running, connected to
+// nothing, and exits 0 once it is signalled. Setting CLAUDINGTIN_SAFETY_REVIEW
+// to any non-empty value reprints that screen and exits 0 immediately, before
+// argument parsing, identity, the gate, or any network.
+//
+// Exit codes: 0 clean exit (SIGINT/SIGTERM after a bare context cancel, the
+// peer ending the session, please_update, or a declined first-run screen — or
+// CLAUDINGTIN_SAFETY_REVIEW was set); 2 bad arguments; 1 any startup or runtime
+// failure.
 package main
 
 import (
@@ -23,6 +33,7 @@ import (
 
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/identity"
 	runner "github.com/diegovillafuerte1/claudingtin/companion/internal/run"
+	"github.com/diegovillafuerte1/claudingtin/companion/internal/safety"
 	"github.com/diegovillafuerte1/claudingtin/proto"
 )
 
@@ -39,13 +50,23 @@ func main() {
 	// already imports it transitively.
 	_ = proto.PROTOCOL_VERSION
 
-	os.Exit(run(os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], os.Getenv, os.Stdin, os.Stdout, os.Stderr))
 }
 
 // run is main without the process exit: it does everything and returns the exit
 // code, so the argument/identity/exit-code wiring is testable. os.Exit lives
 // only in main.
-func run(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+func run(args []string, getenv func(string) string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// CLAUDINGTIN_SAFETY_REVIEW is the re-access path for the first-run screen
+	// until a companion menu exists: reprint it and exit 0, touching no
+	// arguments, identity, gate, or network. A pure launch-surface concern, so
+	// it runs before resolve and does not depend on well-formed args.
+	// Fprint, not Fprintln: safety.Screen() already ends in a newline.
+	if getenv("CLAUDINGTIN_SAFETY_REVIEW") != "" {
+		fmt.Fprint(stdout, safety.Screen())
+		return 0
+	}
+
 	cfg, configDir, err := resolve(args, getenv)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -70,6 +91,8 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		return 1
 	}
 	cfg.AccountKey = key
+	cfg.ConfigDir = configDir
+	cfg.In = stdin
 	cfg.Out = stdout
 	cfg.Err = stderr
 

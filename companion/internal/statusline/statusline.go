@@ -31,6 +31,11 @@ const (
 	// PhaseUpdateNeeded: the server asked this companion to update; nothing
 	// else will happen until the user installs a newer build.
 	PhaseUpdateNeeded
+	// PhaseInert: the first-run screen was not accepted, so nothing is
+	// connected and nothing will be until the user comes back to it. No guilt,
+	// no nagging. Appended last on purpose — the earlier constants must keep
+	// their values.
+	PhaseInert
 )
 
 // line is the copy for a phase. Kept deliberately short and unpolished.
@@ -46,6 +51,8 @@ func line(p Phase) string {
 		return "lost the thread for a moment — picking it back up"
 	case PhaseUpdateNeeded:
 		return "this companion is out of date — grab the latest build to keep going"
+	case PhaseInert:
+		return "nothing's connected — you can turn this on whenever you like"
 	default:
 		return "…"
 	}
