@@ -10,6 +10,9 @@
 # cross-compiled for all three and has OS-sensitive runtime paths (the fsnotify
 # transcript tailer and its symlink handling, process signalling); running the
 # suite on every OS is standing regression insurance, not tied to any one story.
+# Tests run under `-race` on every OS: the backend hub and the wsclient are
+# genuinely concurrent, and the OS-specific fsretry paths are exactly where a
+# data race would hide (epic-1 retrospective, finding F1).
 
 name: ci
 
@@ -55,7 +58,7 @@ jobs:
           mods=$(bash scripts/workspace_modules.sh) || { echo "::error::workspace_modules.sh failed"; exit 1; }
           read -ra mod_args <<<"$mods"
           [ "${#mod_args[@]}" -gt 0 ] || { echo "::error::no workspace modules resolved"; exit 1; }
-          go test "${mod_args[@]}"
+          go test -race "${mod_args[@]}"
 
   lint:
     runs-on: ubuntu-latest

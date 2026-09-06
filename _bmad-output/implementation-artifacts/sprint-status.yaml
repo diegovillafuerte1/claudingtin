@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-01-2026 02:10
-last_updated: 09-06-2026 15:30
+last_updated: 09-06-2026 17:42
 project: claudingtin
 project_key: NOKEY
 tracking_system: file-system
@@ -45,7 +45,7 @@ development_status:
   1-7-sessionstart-hook-fail-open-launch: done
   1-8-pane-placement: done
   1-9-first-run-screen-and-18-gate-as-a-local-precondition: done
-  epic-1-retrospective: optional
+  epic-1-retrospective: done
 
   epic-2: backlog
   2-1-fifo-queue-and-single-writer-pairing-loop: backlog
@@ -92,3 +92,56 @@ development_status:
   6-4-privacy-posture-and-open-source-documentation: backlog
   6-5-license: backlog
   epic-6-retrospective: optional
+action_items:
+  - id: "epic-1-retro-item-1-f1-add-race-to-the-go-test-step-in-githu"
+    epic: 1
+    action: "F1: Add `-race` to the `go test` step in .github/workflows/ci.yml (consider
+      scoping to ubuntu + macos; -race needs a C toolchain)."
+    owner: "Diego"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
+  - id: "epic-1-retro-item-2-f2-reconcile-epics-md-story-1-2-acceptan"
+    epic: 1
+    action: "F2: Reconcile epics.md Story 1.2 acceptance criteria — annotate the modernc.org/sqlite
+      Windows build+open check as deferred to the story that first imports the dependency."
+    owner: "Diego"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
+  - id: "epic-1-retro-item-3-f3-decide-warn-vs-refuse-on-ws-to-a-non"
+    epic: 1
+    action: "F3: Decide warn-vs-refuse on ws:// to a non-loopback host in companion
+      resolve/dialer; until then record the accepted, time-boxed deviation from the
+      TLS/WSS invariant (expiry: Epic 6 deploy)."
+    owner: "Diego"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
+  - id: "epic-1-retro-item-4-f7-product-decision-give-non-tmux-users"
+    epic: 1
+    action: "F7: Product decision — give non-tmux users a visible first-run path (companion-menu
+      accept, a user-visible cue, or TTY-aware placement). Likely an Epic 2/3 story."
+    owner: "Diego"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
+  - id: "epic-1-retro-item-5-f8-before-epic-2-one-real-end-to-end-run"
+    epic: 1
+    action: "F8: Before Epic 2 — one real end-to-end run: build and populate plugin/bin/<os>-<arch>/
+      locally, install the plugin, start a Claude Code session, confirm the companion
+      launches and the first-run gate clears."
+    owner: "Diego"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
+  - id: "epic-1-retro-item-6-f6-drop-the-dead-_-proto-protocol_versio"
+    epic: 1
+    action: "F6: Drop the dead `_ = proto.PROTOCOL_VERSION` crutch and the bare proto
+      import from companion/main.go (the dependency-direction check already asserts
+      the real edge)."
+    owner: "Diego"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
+  - id: "epic-1-retro-item-7-f4-when-a-third-atomic-file-caller-appea"
+    epic: 1
+    action: "F4: When a third atomic-file caller appears, extract companion/internal/atomicfile
+      from the duplicated identity + safety write/read dance."
+    owner: "Diego"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
