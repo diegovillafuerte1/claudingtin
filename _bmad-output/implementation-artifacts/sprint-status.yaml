@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-01-2026 02:10
-last_updated: 09-06-2026 17:42
+last_updated: 09-06-2026 17:57
 project: claudingtin
 project_key: NOKEY
 tracking_system: file-system
@@ -128,7 +128,7 @@ action_items:
       locally, install the plugin, start a Claude Code session, confirm the companion
       launches and the first-run gate clears."
     owner: "Diego"
-    status: open
+    status: in-progress
     ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
   - id: "epic-1-retro-item-6-f6-drop-the-dead-_-proto-protocol_versio"
     epic: 1
