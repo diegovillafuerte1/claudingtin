@@ -6,9 +6,10 @@
 # docker/build-push-action. The Go version always comes from go.work via
 # setup-go's go-version-file — never a literal here.
 #
-# No macOS test runner yet: the companion is cross-*compiled* for Darwin in the
-# cross-build job but not executed. Add a macos-latest entry to the test matrix
-# when Darwin-specific paths (fsnotify, tmux) land in Story 1.6.
+# The test job runs on Linux, macOS, and Windows. The companion is
+# cross-compiled for all three and has OS-sensitive runtime paths (the fsnotify
+# transcript tailer and its symlink handling, process signalling); running the
+# suite on every OS is standing regression insurance, not tied to any one story.
 
 name: ci
 
@@ -26,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

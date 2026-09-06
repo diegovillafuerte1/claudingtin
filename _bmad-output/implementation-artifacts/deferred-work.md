@@ -125,3 +125,15 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-5-account-key-at-a-reinstall-stable-path.md`
   summary: No test for a symlink at the `account-key` path. `firstCreate`'s `O_EXCL` refuses to create through a dangling symlink, but `regenerate`'s `os.Rename` silently replaces a symlink and `inspect` / `reread` follow one (an attacker-planted symlink to a valid-looking UUID file elsewhere would be reused).
   evidence: blind-hunter. Requires local write access to the config dir (already game-over for identity integrity); low value, listed for completeness.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-6-companion-launch-transcript-watch-ready-busy-over-the-websoc.md`
+  summary: The companion accepts `ws://` (cleartext) to any host from the `server-url` arg or `SERVER_URL`; the account key then travels in the `hello` frame unencrypted. The architecture spine mandates TLS/WSS for all client↔server traffic, but nothing warns or refuses on a `ws://` URL to a non-loopback host.
+  evidence: blind-hunter. Needs a deliberate warn-vs-refuse decision that also accounts for self-host deploys terminating TLS at a proxy; the compiled default is `ws://127.0.0.1:8080/ws` (loopback dev) and changing it is already Ask-First.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-6-companion-launch-transcript-watch-ready-busy-over-the-websoc.md`
+  summary: `wsclient.Run` resets the reconnect backoff (`attempt = 0`) the instant the `hello` write returns nil, before `serve` runs. A backend that accepts the socket then immediately drops it never lets the client accrue backoff, so N companions can hammer a crash-looping or draining backend roughly every `backoffBase` (~0.5s). Consider gating the reset on a minimum post-`hello` connection uptime.
+  evidence: verification-gap + blind-hunter. Matches the spec's literal wording ("backoff reset after a successful hello"), so tightening it is a spec renegotiation, not a patch; low impact at v1 scale (one small instance) but a real thundering-herd path.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-6-companion-launch-transcript-watch-ready-busy-over-the-websoc.md`
+  summary: Inbound `proto.Error` frames are silently discarded by `wsclient.serve` (only `please_update` / `session_ended` are recognised). If a future backend rejects the `hello` with an `error` frame + normal close, the companion reconnects forever re-sending the same rejected hello with zero operator feedback. Unreachable in Epic 1 (the only `error`-on-first-frame paths are bad/empty-key frames, which `identity.Load` + the encoder preclude), and the spec Code Map explicitly says "all other inbound frames discarded".
+  evidence: blind-hunter + edge-case-hunter. Becomes relevant when later epics add backend-side rejection paths; fix is to surface a scrubbed `Code`/`Msg` line to stderr while still honouring "an error is never a transport close".

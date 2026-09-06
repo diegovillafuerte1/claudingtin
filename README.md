@@ -8,7 +8,7 @@ This repository is a Go workspace (`go.work`) over four modules — `proto`, `ba
 |--------|------|-------------|------------|------|
 | `proto` | `./proto` | `github.com/diegovillafuerte1/claudingtin/proto` | — (stdlib only) | Wire contract: the `{type, v, ...payload}` envelope, `PROTOCOL_VERSION`, one struct + `snake_case` discriminator per v1 message, and `Encode`/`Decode`. |
 | `backend` | `./backend` | `github.com/diegovillafuerte1/claudingtin/backend` | `proto` | Server: `cmd/serve` (websocket + `GET /status`), `cmd/ban`, `cmd/reports`. Minimal in Epic 1. |
-| `companion` | `./companion` | `github.com/diegovillafuerte1/claudingtin/companion` | `proto`, `fsnotify` | Local TUI that tails the Claude Code transcript and speaks `ready`/`busy` over the websocket. Transcript turn-boundary parser + fsnotify tailer live in `internal/transcript`; the format it targets is pinned in [`docs/transcript-format.md`](docs/transcript-format.md). |
+| `companion` | `./companion` | `github.com/diegovillafuerte1/claudingtin/companion` | `proto`, `fsnotify`, `coder/websocket` | Local TUI that tails the Claude Code transcript and speaks `ready`/`busy` over the websocket. Transcript turn-boundary parser + fsnotify tailer live in `internal/transcript`; the format it targets is pinned in [`docs/transcript-format.md`](docs/transcript-format.md). |
 | `plugin` | `./plugin` | `github.com/diegovillafuerte1/claudingtin/plugin` | — (execs the companion by path) | `cmd/session-start` launcher and the `hooks/` SessionStart script. Committed cross-built companion binaries live under `bin/<os>-<arch>/`. |
 
 ## Backend
@@ -37,6 +37,31 @@ account key and no frame text**. The process shuts down gracefully on `SIGINT` /
 
 ## Companion
 
+### Runtime
+
+The `SessionStart` hook launches the companion once per Claude Code session with
+three positional arguments — `transcript-path`, `config-dir`, `server-url`. A
+non-empty `transcript-path` is required; an empty `server-url` falls back to
+`$SERVER_URL`, then to a compiled-in localhost default; the resolved URL must be
+`ws://` or `wss://` with a host, and if it has no path `/ws` is appended. It
+loads the account key, opens one websocket to the backend (`coder/websocket`),
+sends a version + key `hello`, then tails the transcript and turns each turn
+boundary into a `ready` (model thinking) or `busy` (your turn) frame within
+about a second. A dropped connection is retried forever with exponentially
+backed-off, fully jittered delay, re-sending `hello` and re-announcing the
+current state on every reconnect. The companion writes only a one-line status to
+its own stdout and diagnostics to stderr — never to the Claude Code TUI — and
+the account key appears in no log, error, or status line. `please_update` from
+the backend stops the retries and leaves the process running; `session_ended`,
+`SIGINT`, or `SIGTERM` shut it down cleanly.
+
+Exit codes: **0** — clean exit (context cancelled by `SIGINT`/`SIGTERM`, the
+peer ended the session, or `please_update` was received and the process was then
+signalled); **2** — wrong number of positional arguments; **1** — any other
+startup failure (empty `transcript-path`, an unusable `server-url`, config-dir
+resolution, account-key load) or a fatal runtime error such as the transcript
+watch dying.
+
 ### Account key
 
 The companion's whole identity to the backend is a single random UUIDv4. It is
@@ -62,7 +87,7 @@ path is passed to the companion as a launch argument in a later story.
 
 ## Development
 
-Requires Go 1.27.x. The only third-party dependency is `github.com/fsnotify/fsnotify` (pinned `v1.10.1`, used by the companion's transcript tailer); `proto`, `backend`, and `plugin` stay stdlib-only. The first build needs module downloads (or a primed module cache) to fetch it; `companion/go.sum` keeps that reproducible. After that, no network access is needed to build or test.
+Requires Go 1.27.x. Third-party dependencies are `github.com/fsnotify/fsnotify` (pinned `v1.10.1`, the companion's transcript tailer) and `github.com/coder/websocket` (pinned `v1.8.15`, the companion↔backend websocket, also used by `backend`); `proto` and `plugin` stay stdlib-only. The first build needs module downloads (or a primed module cache) to fetch them; each module's `go.sum` keeps that reproducible. After that, no network access is needed to build or test.
 
 From the repository root (Go's `./...` does not span workspace modules on its own, so name them):
 
@@ -92,9 +117,10 @@ Two GitHub Actions workflows live in `.github/workflows/`.
 **`ci.yml`** runs on every pull request and on push to `main`:
 
 - **test** — `go build` / `go vet` / `go test` the `go.work`-derived module set
-  on `ubuntu-latest` and `windows-latest`. (No macOS runner yet — the companion
-  is cross-*compiled* for Darwin but not exercised until Story 1.6 adds
-  Darwin-specific paths.)
+  on `ubuntu-latest`, `macos-latest`, and `windows-latest`. The companion ships
+  for all three and has OS-sensitive runtime paths (the fsnotify transcript
+  tailer and its symlink handling, process signalling); running the suite on
+  every OS is standing regression insurance.
 - **lint** — `gofmt -l .`, `go work sync` must be a no-op, `shellcheck` over
   `scripts/*.sh` and `plugin/hooks/*.sh`, `scripts/check_deps.sh`
   (dependency direction), and `scripts/workspace_modules.sh --check`
