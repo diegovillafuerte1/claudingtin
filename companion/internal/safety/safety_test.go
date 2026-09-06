@@ -109,15 +109,16 @@ func TestAccepted(t *testing.T) {
 	})
 
 	t.Run("unreadable path is a wrapped error", func(t *testing.T) {
-		// A configDir whose parent path component is a regular file: the open
-		// fails with ENOTDIR — not os.ErrNotExist — so Accepted returns a
-		// wrapped error. Works regardless of euid (no chmod needed).
-		tmp := t.TempDir()
-		notADir := filepath.Join(tmp, "file")
-		if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		// safety-ack resolves to a directory: fsretry.Open succeeds but the
+		// read fails (EISDIR / ERROR_INVALID_FUNCTION), so Accepted returns a
+		// wrapped error. Deterministic on every OS and euid — a not-a-directory
+		// path component reads back as os.ErrNotExist on Windows, and chmod is
+		// a no-op for root.
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, ackFileName), 0o755); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		ok, err := Accepted(filepath.Join(notADir, "cfg"))
+		ok, err := Accepted(dir)
 		if err == nil {
 			t.Fatalf("Accepted = (%v, nil), want a wrapped error", ok)
 		}
