@@ -93,3 +93,35 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-4-minimal-backend-hello-connection-registry-status-skeleton.md`
   summary: CI's `test` job runs `go test` without `-race`, but this story's Verification section and the frozen "Always" bullet both require `go test -race`, and this story adds the first genuinely concurrent code (the AD-8 single-writer hub). Add `-race` to the `go test` step in `.github/workflows/ci.yml` (deliberately left read-only by spec-1-4; weigh the Windows-runner cost / cgo requirement).
   evidence: verification-gap. `go test -race` passes locally; the gap is that CI does not enforce it going forward.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-5-account-key-at-a-reinstall-stable-path.md`
+  summary: Concurrent regeneration of an already-corrupt `account-key` is not race-free — two companions starting at the same instant with a pre-corrupt file each run `regenerate()` (no `O_EXCL`, no lock) and can return divergent keys for that session (self-heals on the next start). First-run concurrency is handled; corrupt-file concurrency is not.
+  evidence: blind-hunter + edge-case-hunter. Spec's frozen convergence guarantee is explicitly scoped to "racing first-run processes"; a lock-file design is out of scope for Epic 1 and AD-11 records "evasion accepted". Rare compound condition, self-healing.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-5-account-key-at-a-reinstall-stable-path.md`
+  summary: `resolveExisting` aborts on a transient non-ENOENT read error during the convergence poll (`return "", err`) instead of retrying within the window and only bailing after attempts are exhausted.
+  evidence: edge-case-hunter. Low severity — a transient read failure on a local file you just lost an `O_EXCL` race for is unlikely — but it makes first-run `Load` brittle under it.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-5-account-key-at-a-reinstall-stable-path.md`
+  summary: On Windows, `os.Rename` in `regenerate` can fail with `ERROR_SHARING_VIOLATION` when another companion process has the key file open for reading during a concurrent regeneration; there is no retry. Consider a bounded retry loop on the sharing-violation errno on Windows.
+  evidence: edge-case-hunter. Windows is a target platform; the triggering condition is a rare compound (Windows + corrupt file + simultaneous start + one mid-read). Not fault-injectable on the dev platform.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-5-account-key-at-a-reinstall-stable-path.md`
+  summary: A `SIGKILL` between `os.CreateTemp` and `os.Rename` in `regenerate` leaves an orphan `.account-key-*` temp file in the config dir; nothing sweeps stale temp files on startup. They accumulate across crashes during regeneration.
+  evidence: edge-case-hunter + blind-hunter. Self-limiting in practice (regeneration only runs on a corrupt file) and the files are hidden dotfiles; a startup glob-sweep would be the fix.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-5-account-key-at-a-reinstall-stable-path.md`
+  summary: `Load` returns `(string, error)` only and gives the caller no signal about which path was taken (reused / first-created / regenerated-from-corruption). A regeneration is abuse-relevant; a later story (Epic 4 enforcement / telemetry) may want a hook or a second return value.
+  evidence: blind-hunter. Frozen surface is exactly `Load(configDir string) (string, error)`, so any change needs intent renegotiation; deferred as a future need, not a current defect.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-5-account-key-at-a-reinstall-stable-path.md`
+  summary: `Load` does not tighten an already-existing `configDir` whose mode is broader than `0700` (only a freshly created dir gets `0700`, and `tightenPerms` only touches the key file). The key file is `0600` regardless, so exposure is limited to the filename being listable.
+  evidence: blind-hunter. Spec's frozen "Always" only mandates `0700` on a *created* configDir; a dir-mode tighten mirroring `tightenPerms` would be a cheap, consistent hardening.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-5-account-key-at-a-reinstall-stable-path.md`
+  summary: CI (`.github/workflows/ci.yml`) still runs `go test` without `-race`; the `go test -race` acceptance criterion in the 1.3 / 1.4 / 1.5 specs is only met by a manual invocation. `identity`'s concurrent `Load` path would regress undetected in CI. (Same repo-wide gap already logged for spec-1-1 / spec-1-4.)
+  evidence: verification-gap. `go test -race ./companion/...` passes locally; the gap is that nothing enforces it going forward.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-5-account-key-at-a-reinstall-stable-path.md`
+  summary: No test for a symlink at the `account-key` path. `firstCreate`'s `O_EXCL` refuses to create through a dangling symlink, but `regenerate`'s `os.Rename` silently replaces a symlink and `inspect` / `reread` follow one (an attacker-planted symlink to a valid-looking UUID file elsewhere would be reused).
+  evidence: blind-hunter. Requires local write access to the config dir (already game-over for identity integrity); low value, listed for completeness.
