@@ -25,10 +25,68 @@ Built the real binaries (`CGO_ENABLED=0 -trimpath`, same flags as `ci.yml` / `re
 
 ## Not covered
 
-- **A genuine Claude Code plugin install + real session.** The launch path, binary resolution, detached spawn, lock, gate, and backend handshake are all proven against real binaries, but the plugin was not registered into Claude Code's own plugin system and no real CC session was started. That step touches the developer's `~/.claude` config and is left for the owner to run once.
 - **tmux pane placement.** No `tmux` on the test machine — only the no-tmux fallback path was exercised (which is the F7 path, the important one).
 - Non-darwin/arm64 targets (CI cross-build already covers compilation for all four).
 
+---
+
+## Round 2 — genuine Claude Code plugin install + real session (2026-09-06, later)
+
+Added `.claude-plugin/marketplace.json` at the repo root (`source: "./plugin"`), then in a live Claude Code 2.1.263:
+
+```
+/plugin marketplace add /Users/k/Documents/Github/claudingtin
+/plugin install claudingtin@claudingtin
+```
+
+### F9 — the plugin did not load: `hooks.json` was in the wrong schema
+
+First install: **"Installed claudingtin. The plugin couldn't be loaded."** Claude Code's debug log:
+
+```
+[ERROR] Failed to load hooks from ./hooks/hooks.json for claudingtin:
+        "hooks.json must have `hooks` (the hook matchers) or `modules`, or both"
+[DEBUG] Registered 0 hooks from 1 plugins
+```
+
+**Cause:** `plugin/hooks/hooks.json` shipped in the `settings.json` hook shape — the event key (`SessionStart`) at the top level — instead of the *plugin* shape, where events are nested under a top-level `"hooks"` object (`{ "hooks": { "SessionStart": [...] } }`), which every official hook-using plugin uses. Story 1.7 shipped it that way; nothing caught it because there was no schema test and `plugin/bin/` was empty, so the plugin had never actually been installed — the exact gap F8 exists to close.
+
+Compounding it: `plugin/.claude-plugin/plugin.json` also carried `"hooks": "./hooks/hooks.json"`, which made the loader read the same malformed file twice (two `Failed to load` lines).
+
+**Fix (this PR):**
+- `plugin/hooks/hooks.json` → `{ "description": ..., "hooks": { "SessionStart": [ { "matcher": "startup|resume", "hooks": [...] } ] } }`
+- `plugin/.claude-plugin/plugin.json` → drop the redundant `"hooks"` key (auto-discovery finds `hooks/hooks.json`)
+- `plugin/cmd/session-start/manifest_test.go` → new regression guard: asserts the shipped `hooks.json` is the plugin shape (fails on a top-level `SessionStart`), the command references `${CLAUDE_PLUGIN_ROOT}` + `hooks/session-start.sh` with a positive timeout, `plugin.json` has no `hooks` key, and `session-start.sh` exists and is executable
+- spec-1-7 annotated with the correction
+
+### After the fix — verified against a real session
+
+```
+/plugin uninstall claudingtin@claudingtin
+/plugin marketplace update claudingtin
+/plugin install claudingtin@claudingtin      →  "Plugin is now active."
+```
+
+Fresh `claude --debug` session, debug log:
+
+```
+[DEBUG] Read hooks.json for plugin claudingtin: .../plugin/hooks/hooks.json
+[DEBUG] Registered 1 hooks from 1 plugins
+[DEBUG] Hook SessionStart:startup (SessionStart) success:
+        (claudingtin) companion is running; to watch it live, run:  .../companion .../<session>.jsonl "" ""
+```
+
+| Check | Outcome |
+|---|---|
+| Plugin loads, `Registered 1 hooks from 1 plugins` | ✅ pass |
+| `SessionStart:startup` fires, hook exits success within budget, prints the hint line | ✅ pass |
+| Companion process spawns detached, bound to the real session's transcript, and **survives** the hook exit | ✅ pass |
+| Companion connects to a running `backend serve`: `GET /status` → `{"concurrent_users":1}` | ✅ pass |
+| Per-`session_id` lock created in `$TMPDIR` | ✅ pass |
+| `safety-ack` already on disk (from the round-1 manual accept) → new session connects with no prompt | ✅ pass |
+
+Still not covered: **tmux pane placement** (no tmux on the machine).
+
 ## Verdict
 
-The Epic 1 launch + think-time + first-run-gate chain works end to end against real binaries and a real backend. F8 stays **in-progress** pending the genuine Claude Code session install and the tmux path; neither is a blocker for starting Epic 2.
+The Epic 1 launch + think-time + first-run-gate chain works end to end from a real Claude Code plugin install, once the F9 `hooks.json` schema bug is fixed. F8 is **done**; F9's fix is in this PR with a regression test. The only remaining gap is the tmux placement path, which is not a blocker for Epic 2.

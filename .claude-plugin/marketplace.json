@@ -1,0 +1,15 @@
+{
+  "name": "claudingtin",
+  "owner": { "name": "Diego Villafuerte" },
+  "metadata": {
+    "description": "claudingtin — Claude Code think-time chat roulette (local dev marketplace)"
+  },
+  "plugins": [
+    {
+      "name": "claudingtin",
+      "source": "./plugin",
+      "description": "Turns Claude Code think-time into a chat roulette: while the model works, a companion connects you to someone else who is waiting.",
+      "version": "0.1.0"
+    }
+  ]
+}

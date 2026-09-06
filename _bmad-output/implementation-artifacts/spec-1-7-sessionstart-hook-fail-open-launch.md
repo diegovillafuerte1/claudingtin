@@ -64,6 +64,16 @@ extend CI/release to cross-build the launcher alongside the companion.
   `"${CLAUDE_PLUGIN_ROOT}"/hooks/session-start.sh`, `timeout: 10`.
   `plugin/.claude-plugin/plugin.json`: `name` `claudingtin`, `version` `0.1.0`,
   `description`, `author` (name only, no email), `"hooks": "./hooks/hooks.json"`.
+
+  > **Post-Epic-1 correction (epic-1-retro F8, verified against Claude Code
+  > 2.1.263):** the `SessionStart` entry must be nested under a top-level
+  > `"hooks"` object in `hooks.json` — `{ "hooks": { "SessionStart": [...] } }`,
+  > the *plugin* hook shape — not placed at the top level (the `settings.json`
+  > shape), which the plugin loader rejects with *"hooks.json must have `hooks`
+  > … or `modules`"* and silently disables the whole plugin. `plugin.json`
+  > carries **no** `"hooks"` key: `hooks/hooks.json` is auto-discovered, and the
+  > explicit key made the loader read the same file twice. Guarded by
+  > `plugin/cmd/session-start/manifest_test.go`.
 - `plugin` stays dependency-free: stdlib only, no sibling imports, no
   third-party; `plugin/go.mod` gains no `require` and no `go.sum`;
   `scripts/check_deps.sh` output is unchanged.
