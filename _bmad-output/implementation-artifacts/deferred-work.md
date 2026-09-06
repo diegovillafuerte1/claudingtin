@@ -105,6 +105,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-5-account-key-at-a-reinstall-stable-path.md`
   summary: On Windows, `os.Rename` in `regenerate` can fail with `ERROR_SHARING_VIOLATION` when another companion process has the key file open for reading during a concurrent regeneration; there is no retry. Consider a bounded retry loop on the sharing-violation errno on Windows.
   evidence: edge-case-hunter. Windows is a target platform; the triggering condition is a rare compound (Windows + corrupt file + simultaneous start + one mid-read). Not fault-injectable on the dev platform.
+  resolved: RESOLVED on the Story 1.7 branch — `regenerate`'s `os.Rename` and `inspect`'s `os.Open` now go through `companion/internal/fsretry`, which bounded-retries `ERROR_SHARING_VIOLATION` / `ERROR_ACCESS_DENIED` on Windows.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-5-account-key-at-a-reinstall-stable-path.md`
   summary: A `SIGKILL` between `os.CreateTemp` and `os.Rename` in `regenerate` leaves an orphan `.account-key-*` temp file in the config dir; nothing sweeps stale temp files on startup. They accumulate across crashes during regeneration.
@@ -159,5 +160,6 @@
   evidence: blind-hunter. Low probability — Claude Code sets `${CLAUDE_PLUGIN_ROOT}` (checked first after the Story 1.7 patch) and Linux `os.Executable()` already resolves `/proc/self/exe`; the exposure is macOS + env-unset + symlinked install.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-3-transcript-format-spike-and-defensive-parser.md`
-  summary: `TestWatcherRecoversFromRotation` (`companion/internal/transcript/watch_test.go`) flakes on `windows-latest` with `ERROR_SHARING_VIOLATION` ("The process cannot access the file because it is being used by another process") — the test rotates `session.jsonl` while the fsnotify tailer still holds the old handle open, which Windows refuses (Unix allows rename-with-open-handle). The watcher's `reopen()` / open path has no bounded retry on the sharing-violation errno, so a real Claude Code log rotation racing the tailer on Windows can also surface this.
-  evidence: Observed as a CI failure on PR #7 (Story 1.7, which does not touch `transcript/`); passes on re-run. Same Windows errno class already deferred for `identity.regenerate`'s `os.Rename` (see the spec-1-5 entry above). Fix: a short bounded retry loop on `ERROR_SHARING_VIOLATION` around the watcher's file open/reopen, plus a matching retry in the test's rotation helper.
+  summary: `TestWatcherRecoversFromRotation` (`companion/internal/transcript/watch_test.go`) flaked on `windows-latest` with `ERROR_SHARING_VIOLATION` — the watcher's `readAppend` opened `session.jsonl` while a peer renamed a fresh file over it, which Windows refuses (Unix allows rename-with-open-handle). A real Claude Code log rotation racing the tailer on Windows could surface the same.
+  evidence: Observed as a CI failure on PR #7 (Story 1.7, which does not itself touch `transcript/`).
+  resolved: RESOLVED on the Story 1.7 branch — `transcript.readAppend` now opens via `companion/internal/fsretry`, which bounded-retries `ERROR_SHARING_VIOLATION` / `ERROR_ACCESS_DENIED` on Windows.
