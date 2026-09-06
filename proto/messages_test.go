@@ -26,7 +26,7 @@ var roundTripSamples = []any{
 	Heartbeat{},
 	// server -> client
 	Queued{},
-	Matched{},
+	Matched{SessionID: "s-9f8e7d6c5b4a", Pseudonym: "quiet-otter", Blurb: "likes long compiles", Opener: "what are you avoiding right now?"},
 	SessionEnded{},
 	Blocklist{},
 	ProfileAck{},

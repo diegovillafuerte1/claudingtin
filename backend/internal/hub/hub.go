@@ -1,8 +1,11 @@
-// Package hub is the connection registry: exactly one goroutine owns the
-// key -> session map and every other goroutine touches it only by sending a
-// command on a channel (architecture decision AD-8). The registry goroutine
-// never performs network I/O — a takeover only closes the displaced session's
-// evict channel; sending session_ended and closing the socket happens on the
+// Package hub is the single-writer core: exactly one goroutine owns the
+// key -> session map, the strict-FIFO wait queue, the active pairings, and the
+// session_id mint, and every other goroutine touches that state only by sending
+// a command on a channel (architecture decision AD-8). The hub goroutine never
+// performs network I/O and writes no logs — a takeover only closes the displaced
+// session's evict channel, and a match or teardown only does a non-blocking send
+// of a ready-to-write proto frame onto each Session.Outbound channel that the
+// connection handler drains. Sending frames and closing sockets happens on the
 // connection handler's own goroutine.
 package hub
 
@@ -10,16 +13,21 @@ import (
 	"context"
 
 	"github.com/coder/websocket"
+
+	"github.com/diegovillafuerte1/claudingtin/proto"
 )
 
-// Session is one connected account key: its websocket connection plus an evict
+// Session is one connected account key: its websocket connection, an evict
 // channel the hub closes to signal that a newer connection for the same key has
-// taken over. The hub goroutine only ever closes Evict; it never reads or writes
-// Conn.
+// taken over, and a buffered Outbound channel the hub uses to hand the
+// connection handler a proto frame to write (queued / matched / session_ended).
+// The hub goroutine only ever closes Evict and does a non-blocking send on
+// Outbound; it never reads or writes Conn and never blocks on Outbound.
 type Session struct {
-	Key   string
-	Conn  *websocket.Conn
-	Evict chan struct{}
+	Key      string
+	Conn     *websocket.Conn
+	Evict    chan struct{}
+	Outbound chan any
 }
 
 type command interface{ isCommand() }
@@ -30,9 +38,20 @@ type unregisterCmd struct{ s *Session }
 
 type countCmd struct{ reply chan int }
 
+type readyCmd struct{ s *Session }
+
+type busyCmd struct{ s *Session }
+
 func (registerCmd) isCommand()   {}
 func (unregisterCmd) isCommand() {}
 func (countCmd) isCommand()      {}
+func (readyCmd) isCommand()      {}
+func (busyCmd) isCommand()       {}
+
+// maxScan bounds how far past the queue head the pairing loop looks for an
+// eligible successor before the head simply waits — the bounded scan AD-8 calls
+// for.
+const maxScan = 64
 
 // Hub is the single-writer connection registry. Construct it with New, start its
 // owning goroutine with Run, and interact with it only through Register,
@@ -50,12 +69,23 @@ func New() *Hub {
 	}
 }
 
-// Run owns the registry map and consumes the command channel until ctx is
-// cancelled. It performs no network I/O. Run must be called exactly once.
+// Run owns the registry map, the FIFO wait queue, the active pairings, and the
+// session_id mint, and consumes the command channel until ctx is cancelled. It
+// performs no network I/O and writes no logs: on a match or teardown it does a
+// non-blocking send of a ready-to-write proto value onto each Session.Outbound,
+// and the connection handler — the sole writer for that socket — drains it. Run
+// must be called exactly once.
 func (h *Hub) Run(ctx context.Context) {
 	defer close(h.stopped)
 
 	sessions := make(map[string]*Session)
+	p := &pairingState{pairings: make(map[*Session]*Session)}
+
+	// The one eligibility seam. Story 2.1: any non-self successor is eligible.
+	// Epic 4 ANDs block / cooldown / ban predicates into this closure without
+	// touching the scan or the loop.
+	eligible := func(a, b *Session) bool { return a.Key != b.Key }
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -69,6 +99,17 @@ func (h *Hub) Run(ctx context.Context) {
 				// session_ended and closes the socket.
 				if prev, ok := sessions[cmd.s.Key]; ok && prev != cmd.s {
 					close(prev.Evict)
+					// Evict the displaced session from the queue / pairing now,
+					// not when its handler eventually fires unregisterCmd — until
+					// then it could still be matched with a third session. The
+					// later unregisterCmd{prev} cleanup then just no-ops.
+					p.removeFromQueue(prev)
+					p.teardownPair(prev)
+					// Re-drain: a pair that only becomes formable once prev is
+					// gone should form now. This is the Epic-4 eligibility seam —
+					// with a narrower predicate a departing head can unblock a
+					// waiting pair.
+					p.drainQueue(eligible)
 				}
 				sessions[cmd.s.Key] = cmd.s
 			case unregisterCmd:
@@ -78,10 +119,148 @@ func (h *Hub) Run(ctx context.Context) {
 				if cur, ok := sessions[cmd.s.Key]; ok && cur == cmd.s {
 					delete(sessions, cmd.s.Key)
 				}
+				// A disconnect or takeover also drops the session from the queue
+				// (silently) and tears down any pairing (the surviving peer gets
+				// a bare session_ended). Both act on the session pointer, so a
+				// stale Unregister still cleans up its own queue / pairing entry.
+				p.removeFromQueue(cmd.s)
+				p.teardownPair(cmd.s)
+				// Re-drain in case the departure unblocks a waiting pair. This is
+				// the Epic-4 eligibility seam — under a narrower predicate a
+				// blocking head leaving can free the sessions behind it.
+				p.drainQueue(eligible)
+			case readyCmd:
+				// Enqueue the longest-waiting-first queue, then try to pair. Only
+				// a session that is newly enqueued (not already queued, not
+				// already paired) gets a queued frame when it is left waiting.
+				if p.enqueue(cmd.s) {
+					p.drainQueue(eligible)
+					if p.inQueue(cmd.s) {
+						deliver(cmd.s, proto.Queued{})
+					}
+				}
+			case busyCmd:
+				// Leaving while queued is silent; leaving while paired tears the
+				// pairing down and notifies the peer. A session is never both.
+				p.removeFromQueue(cmd.s)
+				p.teardownPair(cmd.s)
+				// Re-drain in case the departure unblocks a waiting pair. This is
+				// the Epic-4 eligibility seam — under a narrower predicate a
+				// blocking head leaving can free the sessions behind it.
+				p.drainQueue(eligible)
 			case countCmd:
 				cmd.reply <- len(sessions)
 			}
 		}
+	}
+}
+
+// pairingState is the hub goroutine's private FIFO queue and pairing table. It
+// is created inside Run and never escapes that goroutine, so every method here
+// runs single-writer.
+type pairingState struct {
+	queue    []*Session
+	pairings map[*Session]*Session
+}
+
+// enqueue appends s to the tail of the wait queue unless it is already queued or
+// already in a pairing. It reports whether s was actually added.
+func (p *pairingState) enqueue(s *Session) bool {
+	if _, paired := p.pairings[s]; paired {
+		return false
+	}
+	if p.inQueue(s) {
+		return false
+	}
+	p.queue = append(p.queue, s)
+	return true
+}
+
+func (p *pairingState) inQueue(s *Session) bool {
+	for _, q := range p.queue {
+		if q == s {
+			return true
+		}
+	}
+	return false
+}
+
+// removeFromQueue drops s from the wait queue if present; a no-op otherwise. No
+// frame is sent — leaving the queue unmatched is always silent.
+func (p *pairingState) removeFromQueue(s *Session) {
+	for i, q := range p.queue {
+		if q == s {
+			p.queue = append(p.queue[:i], p.queue[i+1:]...)
+			return
+		}
+	}
+}
+
+// teardownPair ends s's pairing if it has one: both directions are deleted from
+// the table and the surviving peer receives a bare session_ended. Neither peer
+// is re-enqueued (Epic 3 owns re-enqueue). A no-op if s is not paired.
+func (p *pairingState) teardownPair(s *Session) {
+	peer, ok := p.pairings[s]
+	if !ok {
+		return
+	}
+	delete(p.pairings, s)
+	delete(p.pairings, peer)
+	deliver(peer, proto.SessionEnded{})
+}
+
+// drainQueue pairs the queue head with its first eligible successor for as long
+// as two or more sessions are waiting and a pair can be formed. Each pairing
+// mints exactly one session_id, delivered byte-identical to both peers. If the
+// head has no eligible successor within the bounded scan, the head waits and
+// drainQueue stops.
+func (p *pairingState) drainQueue(eligible func(a, b *Session) bool) {
+	for len(p.queue) >= 2 {
+		idx, ok := firstEligibleSuccessor(p.queue, eligible)
+		if !ok {
+			return
+		}
+		head := p.queue[0]
+		succ := p.queue[idx]
+
+		next := make([]*Session, 0, len(p.queue)-2)
+		for i, s := range p.queue {
+			if i == 0 || i == idx {
+				continue
+			}
+			next = append(next, s)
+		}
+		p.queue = next
+
+		m := proto.Matched{SessionID: newSessionID()}
+		deliver(head, m)
+		deliver(succ, m)
+		p.pairings[head] = succ
+		p.pairings[succ] = head
+	}
+}
+
+// firstEligibleSuccessor scans from just past the queue head, up to maxScan
+// entries, for the first successor the predicate accepts. It returns that
+// successor's index and true, or 0 and false if none qualifies within the bound.
+// The scan shape is frozen: Epic 4 only widens the predicate.
+func firstEligibleSuccessor(queue []*Session, eligible func(a, b *Session) bool) (idx int, ok bool) {
+	head := queue[0]
+	for i := 1; i < len(queue) && i <= maxScan; i++ {
+		if eligible(head, queue[i]) {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// deliver hands msg to a session's connection handler without ever blocking the
+// hub goroutine. A full or nil Outbound channel means the handler is already
+// gone, and dropping the frame is correct.
+func deliver(s *Session, msg any) {
+	select {
+	case s.Outbound <- msg:
+	default:
 	}
 }
 
@@ -103,9 +282,24 @@ func (h *Hub) Register(s *Session) {
 }
 
 // Unregister removes s from the registry, but only if the key still maps to this
-// exact session (a no-op after a takeover replaced it).
+// exact session (a no-op after a takeover replaced it). It always removes s from
+// the wait queue and tears down any pairing s was in.
 func (h *Hub) Unregister(s *Session) {
 	h.send(unregisterCmd{s: s})
+}
+
+// Ready puts s into the FIFO wait queue and attempts a pairing. If s ends up
+// waiting it receives a queued frame on its Outbound channel; if it is paired
+// immediately both peers receive a matched frame. A second Ready for a session
+// that is already queued or already paired does nothing.
+func (h *Hub) Ready(s *Session) {
+	h.send(readyCmd{s: s})
+}
+
+// Busy removes s from the wait queue if it is waiting (silently), or tears down
+// its pairing and sends the surviving peer a bare session_ended if it is paired.
+func (h *Hub) Busy(s *Session) {
+	h.send(busyCmd{s: s})
 }
 
 // Count returns the number of distinct connected account keys. It returns 0 if

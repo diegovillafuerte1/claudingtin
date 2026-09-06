@@ -240,6 +240,24 @@ func helloFor(key string, pv int) proto.Hello {
 	return proto.Hello{AccountKey: key, ProtocolVersion: pv}
 }
 
+// readMatched reads frames from c until it sees a matched frame (a queued frame
+// may legitimately arrive first) and returns it.
+func readMatched(t *testing.T, c *websocket.Conn) proto.Matched {
+	t.Helper()
+	for i := 0; i < 3; i++ {
+		switch m := readMsg(t, c).(type) {
+		case proto.Matched:
+			return m
+		case proto.Queued:
+			continue
+		default:
+			t.Fatalf("expected matched or queued, got %T", m)
+		}
+	}
+	t.Fatal("never received a matched frame")
+	return proto.Matched{}
+}
+
 // --- matrix rows ---------------------------------------------------------------
 
 // Only the accepted path registers the key, so a rising Count already proves no
@@ -424,10 +442,11 @@ func TestPostHelloFramesDiscardedNotRegisteredTwice(t *testing.T) {
 	writeMsg(t, c, helloFor("acct-chatty", proto.PROTOCOL_VERSION))
 	waitCount(t, h.hub, 1)
 
-	// A second hello, other proto frames, raw garbage text, and a binary frame
-	// are all read and discarded — never decoded, never acted on.
+	// A second hello, a non-actionable proto frame, raw garbage text, and a
+	// binary frame are all read and dropped — no state change, no reply.
+	// (ready / busy do have meaning now and are covered by the match tests.)
 	writeMsg(t, c, helloFor("acct-chatty", proto.PROTOCOL_VERSION))
-	writeMsg(t, c, proto.Ready{})
+	writeMsg(t, c, proto.ChatMsg{ClientMsgID: "m1", Text: "ignored"})
 	writeMsg(t, c, proto.Heartbeat{})
 	writeRaw(t, c, `{"type":`)
 	writeBinary(t, c, []byte{0x00, 0x01, 0x02, 0xff})
@@ -436,6 +455,156 @@ func TestPostHelloFramesDiscardedNotRegisteredTwice(t *testing.T) {
 		t.Fatalf("hub.Count = %d, want 1", got)
 	}
 	expectOpenIdle(t, c)
+}
+
+// --- FIFO queue + pairing over the wire --------------------------------------
+
+func TestTwoReadyDialsMatchWithEqualSessionID(t *testing.T) {
+	h := newHarness(t)
+
+	a := h.dial(t)
+	writeMsg(t, a, helloFor("acct-a", proto.PROTOCOL_VERSION))
+	b := h.dial(t)
+	writeMsg(t, b, helloFor("acct-b", proto.PROTOCOL_VERSION))
+	waitCount(t, h.hub, 2)
+
+	writeMsg(t, a, proto.Ready{})
+	writeMsg(t, b, proto.Ready{})
+
+	ma := readMatched(t, a)
+	mb := readMatched(t, b)
+
+	if ma.SessionID == "" {
+		t.Fatal("matched session_id is empty")
+	}
+	if ma.SessionID != mb.SessionID {
+		t.Fatalf("session_id differs: %q vs %q", ma.SessionID, mb.SessionID)
+	}
+	if ma.Pseudonym != "" || ma.Blurb != "" || ma.Opener != "" {
+		t.Fatalf("pseudonym/blurb/opener must be empty in Story 2.1: %#v", ma)
+	}
+}
+
+func TestThirdReadyDialGetsQueued(t *testing.T) {
+	h := newHarness(t)
+
+	a := h.dial(t)
+	writeMsg(t, a, helloFor("acct-a", proto.PROTOCOL_VERSION))
+	b := h.dial(t)
+	writeMsg(t, b, helloFor("acct-b", proto.PROTOCOL_VERSION))
+	waitCount(t, h.hub, 2)
+	writeMsg(t, a, proto.Ready{})
+	writeMsg(t, b, proto.Ready{})
+	readMatched(t, a)
+	readMatched(t, b)
+
+	c := h.dial(t)
+	writeMsg(t, c, helloFor("acct-c", proto.PROTOCOL_VERSION))
+	waitCount(t, h.hub, 3)
+	writeMsg(t, c, proto.Ready{})
+
+	if _, ok := readMsg(t, c).(proto.Queued); !ok {
+		t.Fatal("third dial: expected a queued frame")
+	}
+}
+
+func TestQueuedDialClosingIsSilentAndUncounted(t *testing.T) {
+	h := newHarness(t)
+
+	a := h.dial(t)
+	writeMsg(t, a, helloFor("acct-a", proto.PROTOCOL_VERSION))
+	waitCount(t, h.hub, 1)
+	writeMsg(t, a, proto.Ready{})
+	if _, ok := readMsg(t, a).(proto.Queued); !ok {
+		t.Fatal("expected a queued frame")
+	}
+
+	_ = a.CloseNow() // drop while queued — must be silent
+
+	waitCount(t, h.hub, 0)
+}
+
+func TestPairedDialClosingDeliversSessionEndedToPeer(t *testing.T) {
+	h := newHarness(t)
+
+	a := h.dial(t)
+	writeMsg(t, a, helloFor("acct-a", proto.PROTOCOL_VERSION))
+	b := h.dial(t)
+	writeMsg(t, b, helloFor("acct-b", proto.PROTOCOL_VERSION))
+	waitCount(t, h.hub, 2)
+	writeMsg(t, a, proto.Ready{})
+	writeMsg(t, b, proto.Ready{})
+	readMatched(t, a)
+	readMatched(t, b)
+
+	_ = a.CloseNow() // A's socket drops while paired
+
+	if _, ok := readMsg(t, b).(proto.SessionEnded); !ok {
+		t.Fatal("B: expected a bare session_ended after A dropped")
+	}
+	waitCount(t, h.hub, 1)
+}
+
+func TestBusyWhilePairedDeliversSessionEndedToPeer(t *testing.T) {
+	h := newHarness(t)
+
+	a := h.dial(t)
+	writeMsg(t, a, helloFor("acct-a", proto.PROTOCOL_VERSION))
+	b := h.dial(t)
+	writeMsg(t, b, helloFor("acct-b", proto.PROTOCOL_VERSION))
+	waitCount(t, h.hub, 2)
+	writeMsg(t, a, proto.Ready{})
+	writeMsg(t, b, proto.Ready{})
+	readMatched(t, a)
+	readMatched(t, b)
+
+	writeMsg(t, a, proto.Busy{})
+
+	if _, ok := readMsg(t, b).(proto.SessionEnded); !ok {
+		t.Fatal("B: expected a bare session_ended after A went busy")
+	}
+	// Both sockets stay open; nobody is re-enqueued or evicted.
+	if got := h.hub.Count(); got != 2 {
+		t.Fatalf("hub.Count = %d, want 2", got)
+	}
+}
+
+func TestBusyFrameFromQueuedDialIsSilent(t *testing.T) {
+	h := newHarness(t)
+
+	a := h.dial(t)
+	writeMsg(t, a, helloFor("acct-a", proto.PROTOCOL_VERSION))
+	waitCount(t, h.hub, 1)
+	writeMsg(t, a, proto.Ready{})
+	if _, ok := readMsg(t, a).(proto.Queued); !ok {
+		t.Fatal("A: expected a queued frame")
+	}
+
+	// A bare busy with no prior ready is also harmless.
+	b := h.dial(t)
+	writeMsg(t, b, helloFor("acct-b", proto.PROTOCOL_VERSION))
+	waitCount(t, h.hub, 2)
+	writeMsg(t, b, proto.Busy{})
+
+	// A leaves the queue via busy: no error, no frame, socket stays open.
+	writeMsg(t, a, proto.Busy{})
+	if got := h.hub.Count(); got != 2 {
+		t.Fatalf("hub.Count = %d, want 2 (busy must not evict either connection)", got)
+	}
+
+	// A fresh dial that readies now only gets queued — proving A was removed
+	// from the queue, not sitting there waiting to be matched.
+	c := h.dial(t)
+	writeMsg(t, c, helloFor("acct-c", proto.PROTOCOL_VERSION))
+	waitCount(t, h.hub, 3)
+	writeMsg(t, c, proto.Ready{})
+	if _, ok := readMsg(t, c).(proto.Queued); !ok {
+		t.Fatal("C: expected a queued frame (A must have left the queue)")
+	}
+
+	// Both earlier dials are still open and silent.
+	expectOpenIdle(t, b)
+	expectOpenIdle(t, a)
 }
 
 // --- /status -----------------------------------------------------------------
@@ -545,9 +714,11 @@ func TestLogsCarryNoAccountKeyOrFrameText(t *testing.T) {
 
 	const secretKey = "acct-secret-abc123"
 	const secretText = "please-do-not-log-this-frame-text"
+	const secretKey2 = "acct-secret-def456"
+	const secretKey3 = "acct-secret-ghi789"
 
 	// A full connection lifecycle: hello, a chat frame (discarded), a takeover,
-	// a /status hit, then a drop.
+	// a ready -> match -> busy teardown, a /status hit, then a drop.
 	connA := h.dial(t)
 	writeMsg(t, connA, helloFor(secretKey, proto.PROTOCOL_VERSION))
 	waitCount(t, h.hub, 1)
@@ -565,12 +736,30 @@ func TestLogsCarryNoAccountKeyOrFrameText(t *testing.T) {
 	writeMsg(t, connOld, helloFor(secretKey, proto.PROTOCOL_VERSION-9))
 	_ = readMsg(t, connOld)
 
+	// A match between two more secret keys, then a teardown, to exercise the
+	// matched / session_ended log paths.
+	connC := h.dial(t)
+	writeMsg(t, connC, helloFor(secretKey2, proto.PROTOCOL_VERSION))
+	connD := h.dial(t)
+	writeMsg(t, connD, helloFor(secretKey3, proto.PROTOCOL_VERSION))
+	waitCount(t, h.hub, 3)
+	writeMsg(t, connC, proto.Ready{})
+	writeMsg(t, connD, proto.Ready{})
+	readMatched(t, connC)
+	readMatched(t, connD)
+	writeMsg(t, connC, proto.Busy{})
+	if _, ok := readMsg(t, connD).(proto.SessionEnded); !ok {
+		t.Fatal("connD: expected session_ended after connC went busy")
+	}
+
 	resp, _ := http.Get(h.ts.URL + "/status")
 	if resp != nil {
 		resp.Body.Close()
 	}
 
 	_ = connB.CloseNow()
+	_ = connC.CloseNow()
+	_ = connD.CloseNow()
 	waitCount(t, h.hub, 0)
 
 	// Give the disconnect log line time to land.
@@ -580,14 +769,23 @@ func TestLogsCarryNoAccountKeyOrFrameText(t *testing.T) {
 	if out == "" {
 		t.Fatal("no logs captured")
 	}
-	if strings.Contains(out, secretKey) {
-		t.Fatalf("logs contain the account key:\n%s", out)
+	for _, k := range []string{secretKey, secretKey2, secretKey3} {
+		if strings.Contains(out, k) {
+			t.Fatalf("logs contain an account key (%s):\n%s", k, out)
+		}
 	}
 	if strings.Contains(out, secretText) {
 		t.Fatalf("logs contain frame text:\n%s", out)
 	}
-	// Sanity: the log must actually be JSON lines with expected fields.
+	// Sanity: the log must actually be JSON lines with expected fields, and the
+	// match / teardown paths did log something.
 	if !strings.Contains(out, `"msg":"ws connected"`) {
 		t.Fatalf("expected a 'ws connected' log line, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"msg":"ws matched"`) {
+		t.Fatalf("expected a 'ws matched' log line, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"msg":"ws session ended"`) {
+		t.Fatalf("expected a 'ws session ended' log line, got:\n%s", out)
 	}
 }
