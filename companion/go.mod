@@ -3,6 +3,7 @@ module github.com/diegovillafuerte1/claudingtin/companion
 go 1.27
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/diegovillafuerte1/claudingtin/proto v0.0.0
 	github.com/fsnotify/fsnotify v1.10.1
 )
