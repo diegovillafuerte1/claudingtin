@@ -29,22 +29,22 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-01-2026 02:10
-last_updated: 09-06-2026 12:45
+last_updated: 09-06-2026 15:30
 project: claudingtin
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
 development_status:
-  epic-1: in-progress
+  epic-1: done
   1-1-monorepo-scaffold-and-the-proto-wire-contract: done
-  1-2-ci-cross-build-and-release-skeleton: review
-  1-3-transcript-format-spike-and-defensive-parser: review
-  1-4-minimal-backend-hello-connection-registry-status-skeleton: review
-  1-5-account-key-at-a-reinstall-stable-path: review
-  1-6-companion-launch-transcript-watch-ready-busy-over-the-websoc: review
-  1-7-sessionstart-hook-fail-open-launch: review
-  1-8-pane-placement: review
-  1-9-first-run-screen-and-18-gate-as-a-local-precondition: review
+  1-2-ci-cross-build-and-release-skeleton: done
+  1-3-transcript-format-spike-and-defensive-parser: done
+  1-4-minimal-backend-hello-connection-registry-status-skeleton: done
+  1-5-account-key-at-a-reinstall-stable-path: done
+  1-6-companion-launch-transcript-watch-ready-busy-over-the-websoc: done
+  1-7-sessionstart-hook-fail-open-launch: done
+  1-8-pane-placement: done
+  1-9-first-run-screen-and-18-gate-as-a-local-precondition: done
   epic-1-retrospective: optional
 
   epic-2: backlog
