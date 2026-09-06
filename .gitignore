@@ -6,6 +6,9 @@
 /backend/ban
 /backend/reports
 /companion/companion
+/plugin/cmd/session-start/session-start
+/plugin/session-start
+/session-start
 
 # ...but committed cross-built companion binaries live here on purpose (Story 1.2)
 !plugin/bin/**

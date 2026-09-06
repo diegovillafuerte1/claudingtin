@@ -1,18 +1,42 @@
+// Command session-start is the claudingtin SessionStart launcher. Claude Code
+// runs it (via plugin/hooks/session-start.sh) once per session start or resume.
+// It reads the SessionStart hook JSON on stdin, honours the
+// CLAUDINGTIN_DISABLE opt-out and a per-session_id lock, resolves the committed
+// companion binary under <plugin-root>/bin/<os>-<arch>/, and spawns it detached
+// with (transcript-path, "", "") without waiting.
+//
+// It is fail-open and silent: every path — success, opt-out, malformed input,
+// missing binary, spawn failure, even a panic in the core — ends at the single
+// deferred os.Exit(0) with nothing written to stdout. It never exits non-zero
+// (a non-zero SessionStart hook, in particular exit 2, blocks the session) and
+// never blocks on the child. All policy lives in launch.go's pure core; this
+// file only wires the real stdin / env / temp-dir / spawn and maps the result
+// to the exit.
 package main
 
-import "os"
+import (
+	"io"
+	"os"
+)
 
-// Story 1.7 fills this in: resolve the platform companion binary under
-// ${CLAUDE_PLUGIN_ROOT}/plugin/bin/<os>-<arch>/ and spawn it detached with
-// (transcript path, config-dir path, server URL), returning in ~50ms and
-// swallowing every failure with nothing on stdout or stderr — the launcher must
-// be silent and fail-open so it never disturbs the Claude Code session.
-//
-// For now this is a compile-only stub: it accepts exactly the three positional
-// arguments and exits, printing nothing. It imports no sibling module — the real
-// launcher execs the companion binary by path, it does not link it.
+const (
+	// disableEnvVar, when truthy, makes the launcher a no-op.
+	disableEnvVar = "CLAUDINGTIN_DISABLE"
+	// lockPrefix names the per-session lock file: <lockPrefix><session id>.lock.
+	lockPrefix = "claudingtin-"
+)
+
 func main() {
-	if len(os.Args[1:]) != 3 {
-		os.Exit(2)
+	// The deferred exit always runs — and swallows a panic anywhere in the
+	// core — so the SessionStart hook can never return non-zero.
+	defer func() {
+		_ = recover()
+		os.Exit(0)
+	}()
+
+	if err := launch(os.Stdin, os.Getenv, os.TempDir(), detachedSpawn); err != nil {
+		// Non-identifying: no session id, no transcript content. Best-effort;
+		// the process exits 0 regardless.
+		io.WriteString(os.Stderr, "claudingtin: could not start companion\n")
 	}
 }

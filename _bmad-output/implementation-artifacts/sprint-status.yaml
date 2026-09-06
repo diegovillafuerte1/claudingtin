@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-01-2026 02:10
-last_updated: 09-05-2026 22:45
+last_updated: 09-06-2026 10:34
 project: claudingtin
 project_key: NOKEY
 tracking_system: file-system
@@ -42,7 +42,7 @@ development_status:
   1-4-minimal-backend-hello-connection-registry-status-skeleton: review
   1-5-account-key-at-a-reinstall-stable-path: review
   1-6-companion-launch-transcript-watch-ready-busy-over-the-websoc: review
-  1-7-sessionstart-hook-fail-open-launch: backlog
+  1-7-sessionstart-hook-fail-open-launch: review
   1-8-pane-placement: backlog
   1-9-first-run-screen-and-18-gate-as-a-local-precondition: backlog
   epic-1-retrospective: optional

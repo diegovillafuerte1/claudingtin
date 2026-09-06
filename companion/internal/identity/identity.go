@@ -27,6 +27,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/diegovillafuerte1/claudingtin/companion/internal/fsretry"
 )
 
 const (
@@ -125,7 +127,10 @@ const maxKeyFileSize = 512
 // trimmed key. Any other open/read error (e.g. permission denied) is returned
 // wrapped.
 func inspect(path string) (string, keyState, error) {
-	f, err := os.Open(path)
+	// fsretry.Open, not os.Open: on Windows a peer process renaming its freshly
+	// written key over this path (regenerate, or an O_EXCL winner) makes a bare
+	// open fail transiently with ERROR_SHARING_VIOLATION.
+	f, err := fsretry.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", stateMissing, nil
@@ -239,7 +244,7 @@ func regenerate(path string) (string, error) {
 	if err := finalizeKeyFile(tmp, uuid, "temp key file"); err != nil {
 		return "", err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := fsretry.Rename(tmpName, path); err != nil {
 		return "", fmt.Errorf("identity: replace key file: %w", err)
 	}
 	removeTmp = false

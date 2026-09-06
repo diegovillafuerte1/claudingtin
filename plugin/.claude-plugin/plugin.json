@@ -1,0 +1,9 @@
+{
+  "name": "claudingtin",
+  "version": "0.1.0",
+  "description": "Turns Claude Code think-time into a chat roulette: while the model works, a companion quietly connects you to someone else who is waiting, and drops the line the moment your session needs you back.",
+  "author": {
+    "name": "Diego Villafuerte"
+  },
+  "hooks": "./hooks/hooks.json"
+}
