@@ -44,11 +44,13 @@ const (
 )
 
 // convergeAttempts / convergeInterval bound how long a process that lost the
-// O_EXCL first-create race waits for the winner to write its key before
-// concluding the file is genuinely empty/corrupt and replacing it. ~100ms worst
-// case, only ever hit under a real first-run race. Package-level vars, not
-// consts, only so a test can widen the window; nothing outside this package
-// touches them.
+// first-create link race waits on a key file that is present but not yet valid
+// before concluding it is genuinely empty/corrupt (no live writer) and
+// replacing it. Since firstCreate now publishes the key atomically, a race
+// loser almost always sees a valid file on the first look; this window is the
+// safety net for a stale or externally corrupted file. ~100ms worst case.
+// Package-level vars, not consts, only so a test can widen the window; nothing
+// outside this package touches them.
 var (
 	convergeAttempts = 20
 	convergeInterval = 5 * time.Millisecond
@@ -73,14 +75,16 @@ func DefaultConfigDir() (string, error) {
 //
 // configDir is created with mode 0700 if it does not exist. The key file is
 // always written with mode 0600; an existing valid key file with broader
-// permissions is tightened on a best-effort basis. First creation uses
-// O_CREATE|O_EXCL so that racing first-run processes converge on one key;
-// regeneration writes a sibling temp file and renames it into place. After any
-// create or regenerate the file is re-read and the on-disk value returned.
+// permissions is tightened on a best-effort basis. Both first creation and
+// regeneration stage the key in a sibling temp file, fsync it, and publish it
+// onto account-key atomically — first creation hard-links (which fails if the
+// path exists, so racing first-run processes converge on one key), regeneration
+// renames (which replaces). After any create or regenerate the file is re-read
+// and the on-disk value returned.
 //
 // Load only ever touches configDir and the account-key file (plus a sibling
-// temp file during regeneration). It resolves no paths of its own and never
-// reaches into the plugin directory.
+// temp file during create and regeneration). It resolves no paths of its own
+// and never reaches into the plugin directory.
 //
 // On failure Load returns a wrapped error naming the operation that failed and
 // no key; the error never contains key material.
@@ -127,9 +131,9 @@ const maxKeyFileSize = 512
 // trimmed key. Any other open/read error (e.g. permission denied) is returned
 // wrapped.
 func inspect(path string) (string, keyState, error) {
-	// fsretry.Open, not os.Open: on Windows a peer process renaming its freshly
-	// written key over this path (regenerate, or an O_EXCL winner) makes a bare
-	// open fail transiently with ERROR_SHARING_VIOLATION.
+	// fsretry.Open, not os.Open: on Windows a peer process publishing its
+	// freshly written key onto this path (regenerate's rename, or firstCreate's
+	// link) makes a bare open fail transiently with ERROR_SHARING_VIOLATION.
 	f, err := fsretry.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -153,26 +157,43 @@ func inspect(path string) (string, keyState, error) {
 	return key, stateValid, nil
 }
 
-// firstCreate generates a key and writes it with O_CREATE|O_EXCL|O_WRONLY. If
-// another process won the race (os.ErrExist) it falls through to resolveExisting
-// so both callers converge on the winner's key.
+// firstCreate publishes a new key atomically. It writes the key to a sibling
+// temp file and flushes it to stable storage, then hard-links that name onto
+// path. os.Link is atomic and fails with os.ErrExist when path already exists,
+// so a racing caller never observes path half-written — it is either absent or
+// a complete, synced key. The caller that loses the link race falls through to
+// resolveExisting so every caller converges on the winner's key.
+//
+// This replaces an earlier O_CREATE|O_EXCL open-then-write: that left the file
+// present but empty for the duration of the winner's write+fsync, and a slow
+// fsync (loaded host, CI) could outlast the convergence window, so a race loser
+// gave up and regenerated a divergent key over the winner's.
 func firstCreate(path string) (string, error) {
 	uuid, err := newUUIDv4()
 	if err != nil {
 		return "", err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, keyFileMode)
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+keyFileName+"-*")
 	if err != nil {
+		return "", fmt.Errorf("identity: create temp key file: %w", err)
+	}
+	tmpName := tmp.Name()
+	// The temp name is only a staging alias: once linked onto path (or on any
+	// failure) it has served its purpose and is removed, leaving just path.
+	defer func() { _ = os.Remove(tmpName) }()
+
+	// os.CreateTemp already restricts to 0600 on Unix; belt-and-braces, and
+	// best-effort (Windows permissions are advisory).
+	_ = tmp.Chmod(keyFileMode)
+	if err := finalizeKeyFile(tmp, uuid, "temp key file"); err != nil {
+		return "", err
+	}
+	if err := fsretry.Link(tmpName, path); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return resolveExisting(path)
 		}
-		return "", fmt.Errorf("identity: create key file: %w", err)
-	}
-	if err := finalizeKeyFile(f, uuid, "key file"); err != nil {
-		// A write/sync/close failure after the O_EXCL open must not leave a
-		// partial or zero-length key file behind.
-		_ = os.Remove(path)
-		return "", err
+		return "", fmt.Errorf("identity: link key file into place: %w", err)
 	}
 	return reread(path, uuid), nil
 }
@@ -198,10 +219,12 @@ func finalizeKeyFile(f *os.File, uuid, label string) error {
 	return nil
 }
 
-// resolveExisting handles the O_EXCL loser: the file is there but the winner may
-// not have written its key yet. Re-read across the convergence window, returning
-// the winner's key as soon as it appears; only if the window expires with the
-// file still empty/corrupt (no live writer) is it replaced.
+// resolveExisting handles the first-create link loser: path exists, and with
+// atomic link-publish it is almost always already the winner's valid key. It
+// re-reads across the convergence window as a safety net for the rare case of a
+// present-but-not-yet-valid file, returning the key as soon as it appears; only
+// if the window expires with the file still empty/corrupt (no live writer) is it
+// replaced.
 func resolveExisting(path string) (string, error) {
 	for attempt := 0; attempt < convergeAttempts; attempt++ {
 		key, state, err := inspect(path)

@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-// Open and Rename must behave exactly like the os functions on the happy path
-// and on a missing file, on every platform.
-func TestOpenAndRenamePassThrough(t *testing.T) {
+// Open, Rename and Link must behave exactly like the os functions on the happy
+// path and on the error cases callers branch on, on every platform.
+func TestOpenRenameLinkPassThrough(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "a")
 	dst := filepath.Join(dir, "b")
@@ -26,6 +26,17 @@ func TestOpenAndRenamePassThrough(t *testing.T) {
 
 	if _, err := Open(filepath.Join(dir, "nope")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Open(missing) = %v, want ErrNotExist", err)
+	}
+
+	link := filepath.Join(dir, "link")
+	if err := Link(src, link); err != nil {
+		t.Fatalf("Link: %v", err)
+	}
+	if b, err := os.ReadFile(link); err != nil || string(b) != "hi" {
+		t.Fatalf("linked file: %q, %v; want %q", b, err, "hi")
+	}
+	if err := Link(src, link); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("Link(existing dst) = %v, want ErrExist", err)
 	}
 
 	if err := Rename(src, dst); err != nil {
