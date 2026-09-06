@@ -11,6 +11,30 @@ This repository is a Go workspace (`go.work`) over four modules — `proto`, `ba
 | `companion` | `./companion` | `github.com/diegovillafuerte1/claudingtin/companion` | `proto`, `fsnotify` | Local TUI that tails the Claude Code transcript and speaks `ready`/`busy` over the websocket. Transcript turn-boundary parser + fsnotify tailer live in `internal/transcript`; the format it targets is pinned in [`docs/transcript-format.md`](docs/transcript-format.md). |
 | `plugin` | `./plugin` | `github.com/diegovillafuerte1/claudingtin/plugin` | — (execs the companion by path) | `cmd/session-start` launcher and the `hooks/` SessionStart script. Committed cross-built companion binaries live under `bin/<os>-<arch>/`. |
 
+## Backend
+
+`backend serve` (`./backend/cmd/serve`) is the minimal Epic 1 server. It reads
+one environment variable — `PORT`, default `8080` when unset or empty — and
+exposes exactly two HTTP routes:
+
+- **`/ws`** — websocket upgrade. The client's first frame must be a `hello`
+  (`proto` type) carrying its `protocol_version` and account key. The version is
+  gated: `protocol_version >= PROTOCOL_VERSION - 1` is accepted (including a
+  version newer than the backend); anything older gets exactly one
+  `please_update` frame followed by a normal close. A bad first frame (not
+  `hello`, or undecodable) gets one `error` frame (`expected_hello` /
+  `bad_frame`) then a close. On a valid `hello` the account key is registered in
+  a single-writer connection registry; a later `hello` for a live key takes over
+  and the displaced connection receives `session_ended` then a normal close.
+  Post-`hello` frames are read and discarded in this epic.
+- **`GET /status`** — returns `200` with `application/json` body
+  `{"concurrent_users": N}`, where `N` is the number of distinct connected
+  account keys. A non-GET `/status` is `405`; every other path is `404`.
+
+Logs are structured JSON (`log/slog`) to stdout and deliberately carry **no
+account key and no frame text**. The process shuts down gracefully on `SIGINT` /
+`SIGTERM`. TLS is terminated by the operator's proxy, never in-process.
+
 ## Development
 
 Requires Go 1.27.x. The only third-party dependency is `github.com/fsnotify/fsnotify` (pinned `v1.10.1`, used by the companion's transcript tailer); `proto`, `backend`, and `plugin` stay stdlib-only. The first build needs module downloads (or a primed module cache) to fetch it; `companion/go.sum` keeps that reproducible. After that, no network access is needed to build or test.

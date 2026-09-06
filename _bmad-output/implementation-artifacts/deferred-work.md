@@ -81,3 +81,15 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-3-transcript-format-spike-and-defensive-parser.md`
   summary: No `macos-latest` in the CI `test` matrix even though the kqueue-backed fsnotify tailer and its macOS `EvalSymlinks` workaround ship in this story — macOS rename/rotation/symlink behaviour is exercised nowhere in CI. Revisit the `ci.yml` header comment that defers the macOS runner to Story 1.6.
   evidence: verification-gap + blind-hunter. Spec listed adding `macos-latest` under "Ask First"; the implementer correctly stayed in-bounds, so this is surfaced for a deliberate decision.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-4-minimal-backend-hello-connection-registry-status-skeleton.md`
+  summary: On SIGINT/SIGTERM the backend does not drain live websockets — `http.Server.Shutdown` ignores hijacked conns and `hub.Run` drops its map on `ctx.Done()` without closing any `Evict` channel, so connected clients get no `session_ended` and no close frame, just process exit. Needs a hub broadcast/`Range` API and a shutdown path that ends live sessions cleanly. Belongs with AD-17 (reconnect grace) / the deploy-hardening story.
+  evidence: blind-hunter + edge-case-hunter. Spec scoped shutdown to `http.Server.Shutdown` only; acceptable for a skeleton with no matched sessions to preserve, but a real gap once matching lands.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-4-minimal-backend-hello-connection-registry-status-skeleton.md`
+  summary: No connection-liveness check after `hello` — no post-`hello` read deadline, no `heartbeat` handling, and coder/websocket sends no automatic pings. A half-open/dead TCP connection stays in the registry and inflates `/status` `concurrent_users` until an OS-level timeout. Belongs with the story that implements `heartbeat` and/or AD-17.
+  evidence: blind-hunter. Spec "Never" defers post-`hello` frame handling to later epics; surfaced here because `/status` accuracy now depends on it.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-4-minimal-backend-hello-connection-registry-status-skeleton.md`
+  summary: CI's `test` job runs `go test` without `-race`, but this story's Verification section and the frozen "Always" bullet both require `go test -race`, and this story adds the first genuinely concurrent code (the AD-8 single-writer hub). Add `-race` to the `go test` step in `.github/workflows/ci.yml` (deliberately left read-only by spec-1-4; weigh the Windows-runner cost / cgo requirement).
+  evidence: verification-gap. `go test -race` passes locally; the gap is that CI does not enforce it going forward.
