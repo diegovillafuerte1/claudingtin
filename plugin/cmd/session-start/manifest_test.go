@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -116,7 +117,11 @@ func TestHookCommandScriptExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat %s: %v", script, err)
 	}
-	if info.Mode().Perm()&0o100 == 0 {
+	// The POSIX executable bit is meaningless on Windows and is not preserved
+	// by a Windows git checkout, so only assert it where it matters. The shell
+	// wrapper's own `[ -x "$launcher" ]` guard and the plugin's release flow
+	// keep the bit set on the platforms that run it.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o100 == 0 {
 		t.Errorf("%s is not executable (mode %v)", script, info.Mode().Perm())
 	}
 }
