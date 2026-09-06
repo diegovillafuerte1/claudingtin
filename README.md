@@ -35,6 +35,31 @@ Logs are structured JSON (`log/slog`) to stdout and deliberately carry **no
 account key and no frame text**. The process shuts down gracefully on `SIGINT` /
 `SIGTERM`. TLS is terminated by the operator's proxy, never in-process.
 
+## Companion
+
+### Account key
+
+The companion's whole identity to the backend is a single random UUIDv4. It is
+generated on first run and reused on every start — but a key file that is
+missing, empty, whitespace-only, or corrupt is detected and regenerated, so it
+is not guaranteed to be the *same* value forever, only stable as long as the
+file survives. It is stored — via `os.UserConfigDir()` — at:
+
+| OS | Path |
+|----|------|
+| Linux | `$XDG_CONFIG_HOME/claudingtin/account-key`, else `~/.config/claudingtin/account-key` |
+| macOS | `~/Library/Application Support/claudingtin/account-key` |
+| Windows | `%AppData%\claudingtin\account-key` |
+
+The key file is written with mode `0600` and its directory created with `0700`
+(on Windows these bits are advisory, not OS-enforced). The location is
+deliberately *outside* the plugin's own directory, so reinstalling or updating
+the plugin keeps the same key. This file is managed by the companion — don't
+hand-edit it; a hand-written non-canonical or uppercase UUID is treated as
+corrupt and replaced. The package writes no logs and the key appears in no
+returned error or panic message. `internal/identity` owns this; the config-dir
+path is passed to the companion as a launch argument in a later story.
+
 ## Development
 
 Requires Go 1.27.x. The only third-party dependency is `github.com/fsnotify/fsnotify` (pinned `v1.10.1`, used by the companion's transcript tailer); `proto`, `backend`, and `plugin` stay stdlib-only. The first build needs module downloads (or a primed module cache) to fetch it; `companion/go.sum` keeps that reproducible. After that, no network access is needed to build or test.
