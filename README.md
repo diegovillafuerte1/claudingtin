@@ -8,7 +8,7 @@ This repository is a Go workspace (`go.work`) over four modules — `proto`, `ba
 |--------|------|-------------|------------|------|
 | `proto` | `./proto` | `github.com/diegovillafuerte1/claudingtin/proto` | — (stdlib only) | Wire contract: the `{type, v, ...payload}` envelope, `PROTOCOL_VERSION`, one struct + `snake_case` discriminator per v1 message, and `Encode`/`Decode`. |
 | `backend` | `./backend` | `github.com/diegovillafuerte1/claudingtin/backend` | `proto` | Server: `cmd/serve` (websocket + `GET /status`), `cmd/ban`, `cmd/reports`. Minimal in Epic 1. |
-| `companion` | `./companion` | `github.com/diegovillafuerte1/claudingtin/companion` | `proto`, `fsnotify`, `coder/websocket` | Local TUI that tails the Claude Code transcript and speaks `ready`/`busy` over the websocket. Transcript turn-boundary parser + fsnotify tailer live in `internal/transcript`; the format it targets is pinned in [`docs/transcript-format.md`](docs/transcript-format.md). |
+| `companion` | `./companion` | `github.com/diegovillafuerte1/claudingtin/companion` | `proto`, `fsnotify`, `coder/websocket` | Local TUI that tails the Claude Code transcript and speaks `ready`/`busy` over the websocket, behind a local first-run 18+/safety gate. Transcript turn-boundary parser + fsnotify tailer live in `internal/transcript`; the format it targets is pinned in [`docs/transcript-format.md`](docs/transcript-format.md). |
 | `plugin` | `./plugin` | `github.com/diegovillafuerte1/claudingtin/plugin` | — (execs the companion by path) | `cmd/session-start` fail-open launcher plus the `hooks/session-start.sh` arch-dispatch wrapper, registered by `.claude-plugin/plugin.json` → `hooks/hooks.json` (`SessionStart`, `matcher: startup\|resume`). Inside tmux the launcher drops the companion into an adjacent split pane beside the Claude session; with no tmux it spawns it detached and prints one line on how to open a live view. Committed cross-built binaries — the per-platform `session-start` launcher beside the pinned `companion` — live under `bin/<os>-<arch>/`. |
 
 ## Backend
@@ -55,12 +55,38 @@ the account key appears in no log, error, or status line. `please_update` from
 the backend stops the retries and leaves the process running; `session_ended`,
 `SIGINT`, or `SIGTERM` shut it down cleanly.
 
-Exit codes: **0** — clean exit (context cancelled by `SIGINT`/`SIGTERM`, the
-peer ended the session, or `please_update` was received and the process was then
-signalled); **2** — wrong number of positional arguments; **1** — any other
-startup failure (empty `transcript-path`, an unusable `server-url`, config-dir
-resolution, account-key load) or a fatal runtime error such as the transcript
-watch dying.
+Exit codes: **0** — clean exit (`SIGINT`/`SIGTERM` on its own, after the peer
+ended the session, after `please_update`, or after the first-run screen was
+declined and the process was then signalled — or `CLAUDINGTIN_SAFETY_REVIEW` was
+set); **2** — wrong number of positional arguments; **1** — any other startup
+failure (empty `transcript-path`, an unusable `server-url`, config-dir
+resolution, account-key load, an unreadable `safety-ack`) or a fatal runtime
+error such as the transcript watch dying.
+
+### First run
+
+Before the transcript is watched or any websocket is opened, the companion
+prints one plain, local screen to its own stdout — what this is, an honest
+warning that you are put in a room with a stranger and should share nothing
+identifying, how block and report work, and an affirmative "18 or older"
+prompt — and reads one line from its own stdin. Type `yes` (or `y`, or
+`i am 18 or older`) and it records the acknowledgement at
+`<config-dir>/safety-ack` (mode `0600`, holding only the screen version and an
+accepted-at timestamp — no account key, nothing is ever sent to the backend)
+and connects as usual. Anything else, a blank line, or no input at all is a
+decline: nothing is recorded, the status line goes quiet and inert, the process
+keeps running without connecting, and the screen returns on the next run. A
+material change to the screen copy bumps its version so an already-accepted user
+sees it once more.
+
+When the companion is first launched headless or detached — no visible
+terminal, stdin wired to `/dev/null` — the gate cannot be cleared there and it
+stays inert. Run the companion once in a visible terminal to accept; the
+recorded acknowledgement then applies to every later launch.
+
+`CLAUDINGTIN_SAFETY_REVIEW=1 companion` reprints the screen and exits `0`
+without parsing arguments, loading the account key, gating, or connecting — the
+re-access path until the companion grows a menu.
 
 ### Account key
 

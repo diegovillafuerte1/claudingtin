@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/diegovillafuerte1/claudingtin/companion/internal/safety"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/statusline"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/transcript"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/wsclient"
@@ -34,6 +36,21 @@ func withDebounce(t *testing.T, d time.Duration) {
 
 // shrinkDebounce is the fast default used by the e2e tests.
 func shrinkDebounce(t *testing.T) { withDebounce(t, 10*time.Millisecond) }
+
+// uuidLike catches any account-key-shaped string leaking into a returned error.
+var uuidLike = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+
+// ackedConfigDir returns a fresh temp dir with a pre-recorded first-run
+// acknowledgement, so a Run under test clears the gate as "already accepted"
+// (no screen, no stdin read) and exercises the watch + client path as before.
+func ackedConfigDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := safety.Record(dir); err != nil {
+		t.Fatalf("pre-record safety ack: %v", err)
+	}
+	return dir
+}
 
 // fakeClient stands in for *wsclient.Client in the loop tests.
 type fakeClient struct {
@@ -704,6 +721,7 @@ func TestRunEndToEnd_HelloThenReadyThenBusy(t *testing.T) {
 			TranscriptPath: transcriptPath,
 			ServerURL:      rec.wsURL(),
 			AccountKey:     key,
+			ConfigDir:      ackedConfigDir(t),
 			Out:            &bytes.Buffer{},
 			Err:            &bytes.Buffer{},
 		})
@@ -757,6 +775,7 @@ func TestRunEndToEnd_ReconnectReannounces(t *testing.T) {
 			TranscriptPath: transcriptPath,
 			ServerURL:      rec.wsURL(),
 			AccountKey:     key,
+			ConfigDir:      ackedConfigDir(t),
 			Out:            &bytes.Buffer{},
 			Err:            &bytes.Buffer{},
 		})
@@ -800,6 +819,10 @@ func TestRunTearsDownWatcherOnSessionEnded(t *testing.T) {
 		_ = c.Write(context.Background(), websocket.MessageText, b)
 	})
 
+	// A pre-acknowledged config dir: the gate is a straight-through
+	// "already accepted" on every cycle, spawning no goroutine of its own.
+	ackDir := ackedConfigDir(t)
+
 	// Let the httptest server's own goroutines settle, then baseline.
 	time.Sleep(50 * time.Millisecond)
 	runtime.GC()
@@ -811,6 +834,7 @@ func TestRunTearsDownWatcherOnSessionEnded(t *testing.T) {
 			TranscriptPath: transcriptPath,
 			ServerURL:      rec.wsURL(),
 			AccountKey:     "k",
+			ConfigDir:      ackDir,
 			Out:            io.Discard,
 			Err:            io.Discard,
 		}); err != nil {
@@ -871,6 +895,7 @@ func TestOutputScrub(t *testing.T) {
 			TranscriptPath: transcriptPath,
 			ServerURL:      rec.wsURL(),
 			AccountKey:     secretKey,
+			ConfigDir:      ackedConfigDir(t),
 			Out:            &out,
 			Err:            &errBuf,
 		})
@@ -913,5 +938,263 @@ func TestOutputScrub(t *testing.T) {
 	// Sanity: Out did receive the status copy it is supposed to.
 	if !strings.Contains(out.String(), "connecting") {
 		t.Fatalf("Out missing expected status copy:\n%s", out.String())
+	}
+}
+
+// --- first-run gate at the top of Run ---------------------------------------
+
+// TestRunFirstRunAcceptConnects: no prior ack, In delivers "yes\n" — the screen
+// reaches Out, <configDir>/safety-ack is written 0600 with the version and an
+// accepted-at line and no account key, and the server then observes hello.
+func TestRunFirstRunAcceptConnects(t *testing.T) {
+	shrinkDebounce(t)
+
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "session.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("seed transcript: %v", err)
+	}
+	cfgDir := t.TempDir()
+
+	rec := newWSRecorder(t, nil)
+	const key = "acct-first-run-accept"
+	var out lockedBuffer
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Config{
+			TranscriptPath: transcriptPath,
+			ServerURL:      rec.wsURL(),
+			AccountKey:     key,
+			ConfigDir:      cfgDir,
+			In:             strings.NewReader("yes\n"),
+			Out:            &out,
+			Err:            &bytes.Buffer{},
+		})
+	}()
+
+	waitFrames(t, "after accept", func() []string { return frameNames(rec.frames(0)) }, "hello")
+
+	waitUntil(t, "the first-run screen on Out", func() bool {
+		return strings.Contains(out.String(), "18 or older")
+	})
+
+	ackPath := filepath.Join(cfgDir, "safety-ack")
+	fi, err := os.Stat(ackPath)
+	if err != nil {
+		t.Fatalf("safety-ack not written: %v", err)
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Errorf("safety-ack mode = %v, want 0600", fi.Mode().Perm())
+	}
+	body, err := os.ReadFile(ackPath)
+	if err != nil {
+		t.Fatalf("read safety-ack: %v", err)
+	}
+	if !strings.Contains(string(body), "version 1\n") || !strings.Contains(string(body), "accepted_at ") {
+		t.Errorf("safety-ack body = %q, want a version and an accepted-at line", body)
+	}
+	if strings.Contains(string(body), key) {
+		t.Errorf("safety-ack leaked the account key:\n%s", body)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v, want nil", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}
+
+// TestRunFirstRunDeclineStaysInert: no prior ack, In at EOF — no connection is
+// dialed, Out shows the inert line, safety-ack is not created, and Run returns
+// nil after the context is cancelled.
+func TestRunFirstRunDeclineStaysInert(t *testing.T) {
+	shrinkDebounce(t)
+
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "session.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("seed transcript: %v", err)
+	}
+	cfgDir := t.TempDir()
+
+	rec := newWSRecorder(t, nil)
+	var out lockedBuffer
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Config{
+			TranscriptPath: transcriptPath,
+			ServerURL:      rec.wsURL(),
+			AccountKey:     "acct-first-run-decline",
+			ConfigDir:      cfgDir,
+			In:             strings.NewReader(""), // immediate EOF
+			Out:            &out,
+			Err:            &bytes.Buffer{},
+		})
+	}()
+
+	waitUntil(t, "the inert status line", func() bool {
+		return strings.Contains(out.String(), "you can turn this on whenever you like")
+	})
+
+	if n := rec.connCount(); n != 0 {
+		t.Fatalf("a declined gate still dialed the server: connCount = %d", n)
+	}
+	if _, err := os.Stat(filepath.Join(cfgDir, "safety-ack")); !os.IsNotExist(err) {
+		t.Fatalf("safety-ack created on a decline: stat err = %v", err)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v, want nil", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after cancel following a decline")
+	}
+}
+
+// TestRunPreAcceptedConnectsSilently: <configDir>/safety-ack already records the
+// current screen version — no screen text is written to Out and hello is sent
+// with no stdin input.
+func TestRunPreAcceptedConnectsSilently(t *testing.T) {
+	shrinkDebounce(t)
+
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "session.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("seed transcript: %v", err)
+	}
+	cfgDir := ackedConfigDir(t)
+
+	rec := newWSRecorder(t, nil)
+	var out lockedBuffer
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = Run(ctx, Config{
+			TranscriptPath: transcriptPath,
+			ServerURL:      rec.wsURL(),
+			AccountKey:     "acct-pre-accepted",
+			ConfigDir:      cfgDir,
+			In:             strings.NewReader(""), // must not be read
+			Out:            &out,
+			Err:            &bytes.Buffer{},
+		})
+	}()
+
+	waitFrames(t, "pre-accepted connect", func() []string { return frameNames(rec.frames(0)) }, "hello")
+
+	if strings.Contains(out.String(), "18 or older") {
+		t.Fatalf("the first-run screen was printed for a pre-accepted user:\n%s", out.String())
+	}
+}
+
+// TestRunGateErrorPropagates: a ConfigDir whose parent path component is a
+// regular file makes safety.Gate's Accepted read fail; Run must return a
+// wrapped "first-run gate" error carrying no key material, and must not dial.
+func TestRunGateErrorPropagates(t *testing.T) {
+	shrinkDebounce(t)
+
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "session.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("seed transcript: %v", err)
+	}
+	notADir := filepath.Join(dir, "file")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rec := newWSRecorder(t, nil)
+	var out lockedBuffer
+
+	err := Run(context.Background(), Config{
+		TranscriptPath: transcriptPath,
+		ServerURL:      rec.wsURL(),
+		AccountKey:     "acct-gate-error",
+		ConfigDir:      filepath.Join(notADir, "cfg"),
+		In:             strings.NewReader("yes\n"),
+		Out:            &out,
+		Err:            &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("Run returned nil, want a wrapped first-run gate error")
+	}
+	if !strings.Contains(err.Error(), "first-run gate") {
+		t.Fatalf("error = %v, want it to mention the first-run gate", err)
+	}
+	if uuidLike.MatchString(err.Error()) {
+		t.Fatalf("error carries key-shaped material: %v", err)
+	}
+	if n := rec.connCount(); n != 0 {
+		t.Fatalf("server was dialed despite a gate error: connCount = %d", n)
+	}
+}
+
+// TestRunGateAbortReturnsNil: ctx cancelled while the gate is parked on a stdin
+// read that will never complete. Run returns nil, nothing is dialed, and Out
+// carries neither the inert line nor any wire frame.
+func TestRunGateAbortReturnsNil(t *testing.T) {
+	shrinkDebounce(t)
+
+	dir := t.TempDir()
+	transcriptPath := filepath.Join(dir, "session.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("seed transcript: %v", err)
+	}
+	cfgDir := t.TempDir() // deliberately un-acked
+
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+
+	rec := newWSRecorder(t, nil)
+	var out lockedBuffer
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Config{
+			TranscriptPath: transcriptPath,
+			ServerURL:      rec.wsURL(),
+			AccountKey:     "acct-gate-abort",
+			ConfigDir:      cfgDir,
+			In:             pr,
+			Out:            &out,
+			Err:            &bytes.Buffer{},
+		})
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v, want nil on an aborted gate", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return after ctx cancel during the gate")
+	}
+
+	if n := rec.connCount(); n != 0 {
+		t.Fatalf("server was dialed on an aborted gate: connCount = %d", n)
+	}
+	if s := out.String(); strings.Contains(s, "you can turn this on whenever you like") {
+		t.Fatalf("the inert line was shown on an aborted gate:\n%s", s)
+	}
+	if frames := frameNames(rec.frames(0)); len(frames) != 0 {
+		t.Fatalf("wire frames observed on an aborted gate: %v", frames)
 	}
 }

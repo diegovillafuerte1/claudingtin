@@ -16,6 +16,7 @@ func TestShowWritesOneLinePerPhase(t *testing.T) {
 		{"free to chat", PhaseFreeToChat, "claude's thinking — you're free to chat"},
 		{"reconnecting", PhaseReconnecting, "lost the thread for a moment — picking it back up"},
 		{"update needed", PhaseUpdateNeeded, "this companion is out of date — grab the latest build to keep going"},
+		{"inert", PhaseInert, "nothing's connected — you can turn this on whenever you like"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -51,6 +52,23 @@ func TestRepeatedPhaseIsANoOp(t *testing.T) {
 	r.Show(PhaseWaiting)
 	if got := strings.Count(b.String(), "\n"); got != 3 {
 		t.Fatalf("expected 3 lines after waiting→free→waiting, got %d:\n%s", got, b.String())
+	}
+}
+
+func TestInertPhaseRepeatIsANoOp(t *testing.T) {
+	var b strings.Builder
+	r := New(&b)
+
+	r.Show(PhaseInert)
+	first := b.String()
+	if !strings.Contains(first, "whenever you like") {
+		t.Fatalf("first Show(PhaseInert) wrote %q", first)
+	}
+
+	r.Show(PhaseInert)
+	r.Show(PhaseInert)
+	if b.String() != first {
+		t.Fatalf("repeated Show(PhaseInert) wrote again: %q", b.String())
 	}
 }
 
