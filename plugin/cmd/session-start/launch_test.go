@@ -228,20 +228,77 @@ func (r *recordingSpawn) fn(bin string, args []string) error {
 	return r.errRet
 }
 
+// recordingTmux is the tmuxRun twin of recordingSpawn: it captures the argv of
+// each call and returns errRet.
+type recordingTmux struct {
+	calls  [][]string
+	errRet error
+}
+
+func (r *recordingTmux) fn(args []string) error {
+	r.calls = append(r.calls, args)
+	return r.errRet
+}
+
+func TestInsideTmux(t *testing.T) {
+	cases := []struct {
+		name string
+		tmux string
+		want bool
+	}{
+		{"set", "/tmp/tmux-1000/default,12345,0", true},
+		{"unset", "", false},
+		{"whitespace only", "  \t ", false},
+		{"padded value still counts", "  x ", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := insideTmux(func(k string) string {
+				if k == "TMUX" {
+					return tc.tmux
+				}
+				return ""
+			})
+			if got != tc.want {
+				t.Fatalf("insideTmux(TMUX=%q) = %v, want %v", tc.tmux, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLaunch(t *testing.T) {
 	const stdinJSON = `{"session_id":"s1","transcript_path":"/tmp/t.jsonl","hook_event_name":"SessionStart"}`
 
 	env := func(m map[string]string) func(string) string {
 		return func(k string) string { return m[k] }
 	}
+	// tmuxEnv is a getenv with $TMUX set (and optionally $TMUX_PANE), so launch
+	// takes the tmux branch.
+	tmuxEnv := func(pane string) func(string) string {
+		return func(k string) string {
+			switch k {
+			case "TMUX":
+				return "/tmp/tmux-1000/default,900,0"
+			case "TMUX_PANE":
+				return pane
+			default:
+				return ""
+			}
+		}
+	}
 
-	t.Run("normal launch", func(t *testing.T) {
+	t.Run("normal launch (no tmux) spawns detached and prints one hint line", func(t *testing.T) {
 		fakePluginRoot(t)
 		rec := &recordingSpawn{}
+		tmx := &recordingTmux{}
+		var out bytes.Buffer
 		dir := t.TempDir()
 
-		if err := launch(strings.NewReader(stdinJSON), env(nil), dir, rec.fn); err != nil {
+		if err := launch(strings.NewReader(stdinJSON), env(nil), dir, &out, rec.fn, tmx.fn); err != nil {
 			t.Fatalf("launch returned error: %v", err)
+		}
+		if len(tmx.calls) != 0 {
+			t.Fatalf("tmux calls = %d, want 0 (no $TMUX)", len(tmx.calls))
 		}
 		if len(rec.calls) != 1 {
 			t.Fatalf("spawn calls = %d, want 1", len(rec.calls))
@@ -256,18 +313,101 @@ func TestLaunch(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, "claudingtin-s1.lock")); err != nil {
 			t.Fatalf("lock not created: %v", err)
 		}
+		// Exactly one stdout line, naming the companion binary and its
+		// [transcript "" ""] invocation, and no session id.
+		line := strings.TrimRight(out.String(), "\n")
+		if line == "" || strings.Contains(line, "\n") {
+			t.Fatalf("stdout = %q, want exactly one non-empty line", out.String())
+		}
+		if !strings.Contains(line, rec.bins[0]) || !strings.Contains(line, `/tmp/t.jsonl "" ""`) {
+			t.Fatalf("hint line %q does not name the companion invocation", line)
+		}
+		if strings.Contains(out.String(), "s1") {
+			t.Fatalf("hint line %q leaks the session id", out.String())
+		}
+	})
+
+	t.Run("inside tmux places an adjacent unfocused split and does not spawn", func(t *testing.T) {
+		fakePluginRoot(t)
+		rec := &recordingSpawn{}
+		tmx := &recordingTmux{}
+		var out bytes.Buffer
+		dir := t.TempDir()
+
+		if err := launch(strings.NewReader(stdinJSON), tmuxEnv("%7"), dir, &out, rec.fn, tmx.fn); err != nil {
+			t.Fatalf("launch returned error: %v", err)
+		}
+		if len(rec.calls) != 0 {
+			t.Fatalf("spawn calls = %d, want 0 (tmux split handled it)", len(rec.calls))
+		}
+		if out.Len() != 0 {
+			t.Fatalf("stdout = %q, want empty on the tmux path", out.String())
+		}
+		if len(tmx.calls) != 1 {
+			t.Fatalf("tmux calls = %d, want 1", len(tmx.calls))
+		}
+		argv := tmx.calls[0]
+		if len(argv) == 0 || argv[0] != "split-window" {
+			t.Fatalf("tmux argv = %#v, want it to start with split-window", argv)
+		}
+		joined := strings.Join(argv, " ")
+		if !strings.Contains(joined, " -h") || !strings.Contains(joined, " -d") {
+			t.Fatalf("tmux argv %#v missing -h/-d (side-by-side split, no focus change)", argv)
+		}
+		if !strings.Contains(joined, "-t %7") {
+			t.Fatalf("tmux argv %#v does not target $TMUX_PANE", argv)
+		}
+		// The pane command is the companion binary with the unchanged three
+		// args as trailing argv.
+		last4 := argv[len(argv)-4:]
+		wantSuffix := filepath.Join("bin", archTriple(), companionName())
+		if !strings.HasSuffix(last4[0], wantSuffix) || last4[1] != "/tmp/t.jsonl" || last4[2] != "" || last4[3] != "" {
+			t.Fatalf("tmux pane command = %#v, want <companion> /tmp/t.jsonl \"\" \"\"", last4)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "claudingtin-s1.lock")); err != nil {
+			t.Fatalf("lock not created on the tmux path: %v", err)
+		}
+	})
+
+	t.Run("tmux split failure falls back to the detached spawn + hint", func(t *testing.T) {
+		fakePluginRoot(t)
+		rec := &recordingSpawn{}
+		tmx := &recordingTmux{errRet: exec.ErrNotFound}
+		var out bytes.Buffer
+
+		if err := launch(strings.NewReader(stdinJSON), tmuxEnv(""), t.TempDir(), &out, rec.fn, tmx.fn); err != nil {
+			t.Fatalf("launch returned error: %v", err)
+		}
+		if len(tmx.calls) != 1 {
+			t.Fatalf("tmux calls = %d, want 1 (attempted then failed)", len(tmx.calls))
+		}
+		if len(rec.calls) != 1 {
+			t.Fatalf("spawn calls = %d, want 1 (fell back)", len(rec.calls))
+		}
+		line := strings.TrimRight(out.String(), "\n")
+		if line == "" || strings.Contains(line, "\n") {
+			t.Fatalf("stdout = %q, want exactly one non-empty line", out.String())
+		}
+		if !strings.Contains(line, rec.bins[0]) || !strings.Contains(line, `/tmp/t.jsonl "" ""`) {
+			t.Fatalf("fallback hint %q does not name the companion invocation", line)
+		}
+		if strings.Contains(out.String(), "s1") {
+			t.Fatalf("fallback hint %q leaks the session id", out.String())
+		}
 	})
 
 	t.Run("opt-out truthy", func(t *testing.T) {
 		fakePluginRoot(t)
 		rec := &recordingSpawn{}
+		tmx := &recordingTmux{}
+		var out bytes.Buffer
 		dir := t.TempDir()
 
-		if err := launch(strings.NewReader(stdinJSON), env(map[string]string{"CLAUDINGTIN_DISABLE": "1"}), dir, rec.fn); err != nil {
+		if err := launch(strings.NewReader(stdinJSON), env(map[string]string{"CLAUDINGTIN_DISABLE": "1"}), dir, &out, rec.fn, tmx.fn); err != nil {
 			t.Fatalf("launch: %v", err)
 		}
-		if len(rec.calls) != 0 {
-			t.Fatalf("spawn calls = %d, want 0", len(rec.calls))
+		if len(rec.calls) != 0 || len(tmx.calls) != 0 || out.Len() != 0 {
+			t.Fatalf("opt-out did something: spawn=%d tmux=%d stdout=%q", len(rec.calls), len(tmx.calls), out.String())
 		}
 		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 			t.Fatalf("opt-out created files: %v", entries)
@@ -277,7 +417,9 @@ func TestLaunch(t *testing.T) {
 	t.Run("opt-out falsey proceeds", func(t *testing.T) {
 		fakePluginRoot(t)
 		rec := &recordingSpawn{}
-		if err := launch(strings.NewReader(stdinJSON), env(map[string]string{"CLAUDINGTIN_DISABLE": "0"}), t.TempDir(), rec.fn); err != nil {
+		tmx := &recordingTmux{}
+		var out bytes.Buffer
+		if err := launch(strings.NewReader(stdinJSON), env(map[string]string{"CLAUDINGTIN_DISABLE": "0"}), t.TempDir(), &out, rec.fn, tmx.fn); err != nil {
 			t.Fatalf("launch: %v", err)
 		}
 		if len(rec.calls) != 1 {
@@ -288,27 +430,31 @@ func TestLaunch(t *testing.T) {
 	t.Run("already launched", func(t *testing.T) {
 		fakePluginRoot(t)
 		rec := &recordingSpawn{}
+		tmx := &recordingTmux{}
+		var out bytes.Buffer
 		dir := t.TempDir()
 		if err := acquire(dir, "s1"); err != nil {
 			t.Fatal(err)
 		}
-		if err := launch(strings.NewReader(stdinJSON), env(nil), dir, rec.fn); err != nil {
+		if err := launch(strings.NewReader(stdinJSON), tmuxEnv(""), dir, &out, rec.fn, tmx.fn); err != nil {
 			t.Fatalf("launch: %v", err)
 		}
-		if len(rec.calls) != 0 {
-			t.Fatalf("spawn calls = %d, want 0 (lock already held)", len(rec.calls))
+		if len(rec.calls) != 0 || len(tmx.calls) != 0 || out.Len() != 0 {
+			t.Fatalf("resume did something: spawn=%d tmux=%d stdout=%q", len(rec.calls), len(tmx.calls), out.String())
 		}
 	})
 
 	t.Run("malformed stdin", func(t *testing.T) {
 		fakePluginRoot(t)
 		rec := &recordingSpawn{}
+		tmx := &recordingTmux{}
+		var out bytes.Buffer
 		dir := t.TempDir()
-		if err := launch(strings.NewReader("not json"), env(nil), dir, rec.fn); err != nil {
+		if err := launch(strings.NewReader("not json"), env(nil), dir, &out, rec.fn, tmx.fn); err != nil {
 			t.Fatalf("launch: %v", err)
 		}
-		if len(rec.calls) != 0 {
-			t.Fatalf("spawn calls = %d, want 0", len(rec.calls))
+		if len(rec.calls) != 0 || len(tmx.calls) != 0 || out.Len() != 0 {
+			t.Fatalf("malformed input did something: spawn=%d tmux=%d stdout=%q", len(rec.calls), len(tmx.calls), out.String())
 		}
 		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 			t.Fatalf("malformed input created files: %v", entries)
@@ -318,42 +464,48 @@ func TestLaunch(t *testing.T) {
 	t.Run("empty stdin", func(t *testing.T) {
 		fakePluginRoot(t)
 		rec := &recordingSpawn{}
-		if err := launch(strings.NewReader(""), env(nil), t.TempDir(), rec.fn); err != nil {
+		tmx := &recordingTmux{}
+		var out bytes.Buffer
+		if err := launch(strings.NewReader(""), env(nil), t.TempDir(), &out, rec.fn, tmx.fn); err != nil {
 			t.Fatalf("launch: %v", err)
 		}
-		if len(rec.calls) != 0 {
-			t.Fatalf("spawn calls = %d, want 0", len(rec.calls))
+		if len(rec.calls) != 0 || len(tmx.calls) != 0 || out.Len() != 0 {
+			t.Fatalf("empty stdin did something: spawn=%d tmux=%d stdout=%q", len(rec.calls), len(tmx.calls), out.String())
 		}
 	})
 
 	t.Run("missing transcript_path", func(t *testing.T) {
 		fakePluginRoot(t)
 		rec := &recordingSpawn{}
+		tmx := &recordingTmux{}
+		var out bytes.Buffer
 		dir := t.TempDir()
 		for _, in := range []string{`{"session_id":"s1"}`, `{"session_id":"s1","transcript_path":""}`} {
-			if err := launch(strings.NewReader(in), env(nil), dir, rec.fn); err != nil {
+			if err := launch(strings.NewReader(in), env(nil), dir, &out, rec.fn, tmx.fn); err != nil {
 				t.Fatalf("launch(%s): %v", in, err)
 			}
 		}
-		if len(rec.calls) != 0 {
-			t.Fatalf("spawn calls = %d, want 0", len(rec.calls))
+		if len(rec.calls) != 0 || len(tmx.calls) != 0 || out.Len() != 0 {
+			t.Fatalf("missing transcript_path did something: spawn=%d tmux=%d stdout=%q", len(rec.calls), len(tmx.calls), out.String())
 		}
 	})
 
 	t.Run("missing session_id", func(t *testing.T) {
 		fakePluginRoot(t)
 		rec := &recordingSpawn{}
+		tmx := &recordingTmux{}
+		var out bytes.Buffer
 		dir := t.TempDir()
 		for _, in := range []string{
 			`{"transcript_path":"/tmp/t.jsonl"}`,
 			`{"session_id":"","transcript_path":"/tmp/t.jsonl"}`,
 		} {
-			if err := launch(strings.NewReader(in), env(nil), dir, rec.fn); err != nil {
+			if err := launch(strings.NewReader(in), env(nil), dir, &out, rec.fn, tmx.fn); err != nil {
 				t.Fatalf("launch(%s): %v", in, err)
 			}
 		}
-		if len(rec.calls) != 0 {
-			t.Fatalf("spawn calls = %d, want 0 (no session id to dedup on)", len(rec.calls))
+		if len(rec.calls) != 0 || len(tmx.calls) != 0 || out.Len() != 0 {
+			t.Fatalf("missing session_id did something: spawn=%d tmux=%d stdout=%q", len(rec.calls), len(tmx.calls), out.String())
 		}
 		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 			t.Fatalf("empty-session_id path created files: %v", entries)
@@ -369,12 +521,14 @@ func TestLaunch(t *testing.T) {
 		defer func() { osExecutable = prev }()
 
 		rec := &recordingSpawn{}
+		tmx := &recordingTmux{}
+		var out bytes.Buffer
 		dir := t.TempDir()
-		if err := launch(strings.NewReader(stdinJSON), env(nil), dir, rec.fn); err != nil {
+		if err := launch(strings.NewReader(stdinJSON), tmuxEnv(""), dir, &out, rec.fn, tmx.fn); err != nil {
 			t.Fatalf("launch: %v", err)
 		}
-		if len(rec.calls) != 0 {
-			t.Fatalf("spawn calls = %d, want 0 (no binary)", len(rec.calls))
+		if len(rec.calls) != 0 || len(tmx.calls) != 0 || out.Len() != 0 {
+			t.Fatalf("missing binary did something: spawn=%d tmux=%d stdout=%q", len(rec.calls), len(tmx.calls), out.String())
 		}
 		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 			t.Fatalf("missing-binary path created files: %v", entries)
@@ -399,27 +553,34 @@ func TestLaunch(t *testing.T) {
 		defer func() { osExecutable = prev }()
 
 		rec := &recordingSpawn{}
+		tmx := &recordingTmux{}
+		var out bytes.Buffer
 		dir := t.TempDir()
-		if err := launch(strings.NewReader(stdinJSON), env(nil), dir, rec.fn); err != nil {
+		if err := launch(strings.NewReader(stdinJSON), env(nil), dir, &out, rec.fn, tmx.fn); err != nil {
 			t.Fatalf("launch: %v", err)
 		}
-		if len(rec.calls) != 0 {
-			t.Fatalf("spawn calls = %d, want 0 (companion not executable)", len(rec.calls))
+		if len(rec.calls) != 0 || len(tmx.calls) != 0 || out.Len() != 0 {
+			t.Fatalf("non-executable companion did something: spawn=%d tmux=%d stdout=%q", len(rec.calls), len(tmx.calls), out.String())
 		}
 		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 			t.Fatalf("non-executable-companion path created files: %v", entries)
 		}
 	})
 
-	t.Run("spawn error is returned and lock kept", func(t *testing.T) {
+	t.Run("spawn error is returned, no stdout, lock kept", func(t *testing.T) {
 		fakePluginRoot(t)
 		rec := &recordingSpawn{errRet: exec.ErrNotFound}
+		tmx := &recordingTmux{}
+		var out bytes.Buffer
 		dir := t.TempDir()
-		if err := launch(strings.NewReader(stdinJSON), env(nil), dir, rec.fn); err == nil {
+		if err := launch(strings.NewReader(stdinJSON), env(nil), dir, &out, rec.fn, tmx.fn); err == nil {
 			t.Fatalf("launch returned nil, want the spawn error surfaced")
 		}
 		if len(rec.calls) != 1 {
 			t.Fatalf("spawn calls = %d, want 1", len(rec.calls))
+		}
+		if out.Len() != 0 {
+			t.Fatalf("stdout = %q, want empty (hint is success-only)", out.String())
 		}
 		if _, err := os.Stat(filepath.Join(dir, "claudingtin-s1.lock")); err != nil {
 			t.Fatalf("lock removed after spawn error: %v", err)
@@ -454,7 +615,7 @@ func TestSessionStartWrapper(t *testing.T) {
 		writeExecutable(t, filepath.Join(root, "bin", archTriple(), "session-start"), stub)
 
 		cmd := exec.Command("sh", wrapper)
-		cmd.Env = append(os.Environ(), "CLAUDE_PLUGIN_ROOT="+root)
+		cmd.Env = append(os.Environ(), "CLAUDE_PLUGIN_ROOT="+root, "TMUX=")
 		cmd.Stdin = strings.NewReader(stdinJSON)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -476,7 +637,7 @@ func TestSessionStartWrapper(t *testing.T) {
 		root := t.TempDir() // no bin/<os>-<arch>/session-start
 
 		cmd := exec.Command("sh", wrapper)
-		cmd.Env = append(os.Environ(), "CLAUDE_PLUGIN_ROOT="+root)
+		cmd.Env = append(os.Environ(), "CLAUDE_PLUGIN_ROOT="+root, "TMUX=")
 		cmd.Stdin = strings.NewReader(stdinJSON)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -538,6 +699,7 @@ func TestLauncherEndToEndExitsZero(t *testing.T) {
 			cmd.Env = append(os.Environ(),
 				"CLAUDE_PLUGIN_ROOT="+root,
 				"TMPDIR="+t.TempDir(), // isolate the per-session lock file
+				"TMUX=",               // deterministically the no-tmux (manual) path
 			)
 			cmd.Stdin = strings.NewReader(tc.stdin)
 			var stdout, stderr bytes.Buffer
@@ -550,5 +712,70 @@ func TestLauncherEndToEndExitsZero(t *testing.T) {
 				t.Fatalf("real launcher wrote to stdout: %q", stdout.String())
 			}
 		})
+	}
+}
+
+// TestLauncherEndToEndNoTmuxPrintsHint compiles the real ./cmd/session-start
+// against a runnable companion stub and drives it through hooks/session-start.sh
+// with $TMUX unset. It asserts the no-tmux acceptance contract: exit 0 and
+// exactly one stdout line naming the companion invocation.
+func TestLauncherEndToEndNoTmuxPrintsHint(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX sh wrapper is not exercised on Windows")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skipf("no sh on PATH: %v", err)
+	}
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skipf("no go toolchain on PATH: %v", err)
+	}
+
+	moduleDir, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := filepath.Join(moduleDir, "hooks", "session-start.sh")
+
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin", archTriple())
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	build := exec.Command(goBin, "build", "-o", filepath.Join(binDir, "session-start"), "./cmd/session-start")
+	build.Dir = moduleDir
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./cmd/session-start: %v\n%s", err, out)
+	}
+
+	// A companion stub that actually starts (and exits at once) so detachedSpawn
+	// succeeds and the launcher reaches the success-only hint line.
+	companion := filepath.Join(binDir, companionName())
+	writeExecutable(t, companion, "#!/bin/sh\nexit 0\n")
+
+	cmd := exec.Command("sh", wrapper)
+	cmd.Env = append(os.Environ(),
+		"CLAUDE_PLUGIN_ROOT="+root,
+		"TMPDIR="+t.TempDir(),
+		"TMUX=", // no tmux: the manual path with the one-line hint
+	)
+	cmd.Stdin = strings.NewReader(`{"session_id":"e2ehint","transcript_path":"/tmp/t.jsonl"}`)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("real launcher via wrapper exited non-zero: %v (stderr %q)", err, stderr.String())
+	}
+
+	line := strings.TrimRight(stdout.String(), "\n")
+	if line == "" || strings.Contains(line, "\n") {
+		t.Fatalf("stdout = %q, want exactly one non-empty line", stdout.String())
+	}
+	if !strings.Contains(line, companion) || !strings.Contains(line, `/tmp/t.jsonl "" ""`) {
+		t.Fatalf("hint line %q does not name the companion invocation", line)
+	}
+	if strings.Contains(stdout.String(), "e2ehint") {
+		t.Fatalf("hint line %q leaks the session id", stdout.String())
 	}
 }

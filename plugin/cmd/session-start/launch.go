@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -124,18 +125,41 @@ func acquire(tempDir, sessionID string) error {
 	return f.Close()
 }
 
+// placementHint is the single line the launcher writes to stdout on the no-tmux
+// fallback, once the companion is already running. SessionStart stdout is folded
+// into the model's context rather than shown in the user's terminal, so this is
+// phrased as a declarative, plugin-namespaced status note — a leading
+// "(claudingtin)" tag, a statement of fact, then how to watch it — that a model
+// reads as informational, never as an instruction to act on. One line, no
+// session id, no account key, no transcript content; the two %s are the
+// companion binary path and the transcript path, both already on the user's own
+// disk.
+const placementHint = "(claudingtin) companion is running; to watch it live, run:  %s %s \"\" \"\""
+
+// insideTmux reports whether the launcher is running inside a tmux client — a
+// non-blank $TMUX. It is the entire input to the pane-placement choice, kept
+// pure and table-testable.
+func insideTmux(getenv func(string) string) bool {
+	return strings.TrimSpace(getenv("TMUX")) != ""
+}
+
 // launch is the launcher's whole policy, kept pure so it is unit-testable: it
 // reads the SessionStart JSON from stdin, honours the opt-out and the
 // once-per-session lock, resolves the companion binary, and — when everything
-// lines up — asks spawn to start it detached with args
-// [transcriptPath, "", ""].
+// lines up — places the companion beside the Claude session. Inside tmux
+// ($TMUX set) it asks tmuxRun for an adjacent, unfocused split-window pane
+// running the companion with args [transcriptPath, "", ""]; with no tmux, or if
+// that split fails, it asks spawn to start the companion detached with the same
+// args and, only when the spawn succeeds, writes the one-line placementHint to
+// stdout.
 //
 // It never calls os.Exit. It returns nil whenever it deliberately does nothing
 // (opted out, unparseable input, no transcript path, no session id to dedup on,
 // unresolvable plugin root, missing or non-executable binary, session already
-// launched) and returns spawn's error only when a spawn was actually attempted
-// and failed — the thin main swallows that too and exits 0.
-func launch(stdin io.Reader, getenv func(string) string, tempDir string, spawn func(bin string, args []string) error) error {
+// launched) or once placement has succeeded, and returns spawn's error only
+// when a detached spawn was actually attempted and failed — the thin main
+// swallows that too and exits 0.
+func launch(stdin io.Reader, getenv func(string) string, tempDir string, stdout io.Writer, spawn func(bin string, args []string) error, tmuxRun func(args []string) error) error {
 	if optedOut(getenv) {
 		return nil
 	}
@@ -163,5 +187,33 @@ func launch(stdin io.Reader, getenv func(string) string, tempDir string, spawn f
 		return nil
 	}
 
-	return spawn(bin, []string{in.TranscriptPath, "", ""})
+	args := []string{in.TranscriptPath, "", ""}
+
+	// Inside tmux: bring the companion up in an adjacent pane that does not
+	// steal focus from the Claude session. split-window talks to the running
+	// server over $TMUX and returns at once, so this stays well inside the hook
+	// budget. Any tmux failure — no binary (Windows, non-tmux shells), dead
+	// server, non-zero exit — drops through to the detached spawn below.
+	if insideTmux(getenv) {
+		split := []string{"split-window", "-h", "-d"}
+		if pane := strings.TrimSpace(getenv("TMUX_PANE")); pane != "" {
+			split = append(split, "-t", pane)
+		}
+		split = append(split, "--", bin)
+		split = append(split, args...)
+		if tmuxRun(split) == nil {
+			return nil
+		}
+	}
+
+	// No tmux, or the split failed: Story 1.7's detached spawn, unchanged. The
+	// one-line hint is written only once the spawn has actually started — a
+	// spawn failure stays exactly as silent as 1.7 (the thin main still writes
+	// its single non-identifying stderr line).
+	if err := spawn(bin, args); err != nil {
+		return err
+	}
+	hint := fmt.Sprintf(placementHint, bin, in.TranscriptPath)
+	fmt.Fprintln(stdout, hint)
+	return nil
 }

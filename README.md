@@ -9,7 +9,7 @@ This repository is a Go workspace (`go.work`) over four modules — `proto`, `ba
 | `proto` | `./proto` | `github.com/diegovillafuerte1/claudingtin/proto` | — (stdlib only) | Wire contract: the `{type, v, ...payload}` envelope, `PROTOCOL_VERSION`, one struct + `snake_case` discriminator per v1 message, and `Encode`/`Decode`. |
 | `backend` | `./backend` | `github.com/diegovillafuerte1/claudingtin/backend` | `proto` | Server: `cmd/serve` (websocket + `GET /status`), `cmd/ban`, `cmd/reports`. Minimal in Epic 1. |
 | `companion` | `./companion` | `github.com/diegovillafuerte1/claudingtin/companion` | `proto`, `fsnotify`, `coder/websocket` | Local TUI that tails the Claude Code transcript and speaks `ready`/`busy` over the websocket. Transcript turn-boundary parser + fsnotify tailer live in `internal/transcript`; the format it targets is pinned in [`docs/transcript-format.md`](docs/transcript-format.md). |
-| `plugin` | `./plugin` | `github.com/diegovillafuerte1/claudingtin/plugin` | — (execs the companion by path) | `cmd/session-start` fail-open launcher plus the `hooks/session-start.sh` arch-dispatch wrapper, registered by `.claude-plugin/plugin.json` → `hooks/hooks.json` (`SessionStart`, `matcher: startup\|resume`). Committed cross-built binaries — the per-platform `session-start` launcher beside the pinned `companion` — live under `bin/<os>-<arch>/`. |
+| `plugin` | `./plugin` | `github.com/diegovillafuerte1/claudingtin/plugin` | — (execs the companion by path) | `cmd/session-start` fail-open launcher plus the `hooks/session-start.sh` arch-dispatch wrapper, registered by `.claude-plugin/plugin.json` → `hooks/hooks.json` (`SessionStart`, `matcher: startup\|resume`). Inside tmux the launcher drops the companion into an adjacent split pane beside the Claude session; with no tmux it spawns it detached and prints one line on how to open a live view. Committed cross-built binaries — the per-platform `session-start` launcher beside the pinned `companion` — live under `bin/<os>-<arch>/`. |
 
 ## Backend
 
@@ -157,9 +157,15 @@ entry, `matcher: "startup|resume"`, `timeout: 10`) → runs
 `bin/<os>-<arch>/session-start`. The hook fires only on session `startup` and
 `resume`; `clear` and `compact` keep using the companion already launched for
 that session. The launcher reads the hook's stdin JSON, takes a per-`session_id`
-lock in the temp dir (one companion per session), and spawns `companion
-<transcript-path> "" ""` detached without waiting. Set `CLAUDINGTIN_DISABLE` to
+lock in the temp dir (one companion per session), and then places the companion
+beside your Claude session: inside tmux (`$TMUX` set) it opens an adjacent
+`tmux split-window` pane — side by side, no focus stolen from Claude — running
+`companion <transcript-path> "" ""`; with no tmux (VS Code / JetBrains
+terminals, native PowerShell), or if the split fails, it falls back to spawning
+that same command detached without waiting and prints exactly one line telling
+you how to open a split and run it yourself. Set `CLAUDINGTIN_DISABLE` to
 `1`/`true`/`yes`/`on` to disable the launch entirely. Every other path — opt-out,
 malformed input, missing or unusable binary, spawn error, even a panic — still
-exits `0` with nothing on stdout, so a broken or absent companion never blocks
-the Claude Code session.
+exits `0` (that one-line hint on the no-tmux fallback is the only thing ever
+written to stdout), so a broken or absent companion never blocks the Claude Code
+session.
