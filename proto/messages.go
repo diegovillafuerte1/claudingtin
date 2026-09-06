@@ -112,9 +112,17 @@ type Queued struct{}
 // TypeMatched is the discriminator for Matched.
 const TypeMatched = "matched"
 
-// Matched announces a counterpart has been found. Payload fields land in a later
-// epic.
-type Matched struct{}
+// Matched announces a counterpart has been found. SessionID is the backend-minted
+// opaque, unguessable identifier for the pairing — one per match, byte-identical
+// for both peers. Pseudonym and Blurb come from the backend's canonical profile
+// (empty until Epic 5). Opener is the pre-written conversation opener (empty
+// until Story 2.2 adds selection).
+type Matched struct {
+	SessionID string `json:"session_id"`
+	Pseudonym string `json:"pseudonym"`
+	Blurb     string `json:"blurb"`
+	Opener    string `json:"opener"`
+}
 
 // TypeSessionEnded is the discriminator for SessionEnded.
 const TypeSessionEnded = "session_ended"

@@ -108,8 +108,10 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 // serveConn runs one websocket connection start to finish: read the first frame
 // under the hello deadline, gate the protocol version, register the key, then
-// discard further frames until the client goes away or the hub evicts this
-// connection.
+// translate inbound ready / busy frames into hub commands and write whatever
+// frame the hub hands back on sess.Outbound (queued / matched / session_ended),
+// until the client goes away or the hub evicts this connection. This handler is
+// the only goroutine that writes frames to conn.
 func (s *server) serveConn(conn *websocket.Conn, remote string) {
 	// coder/websocket warns against using the request context after Accept, so
 	// the connection gets its own lifetime context.
@@ -165,7 +167,14 @@ func (s *server) serveConn(conn *websocket.Conn, remote string) {
 		return
 	}
 
-	sess := &hub.Session{Key: hello.AccountKey, Conn: conn, Evict: make(chan struct{})}
+	// Outbound is buffered so the hub goroutine's non-blocking send never drops a
+	// frame just because this handler is briefly between reads.
+	sess := &hub.Session{
+		Key:      hello.AccountKey,
+		Conn:     conn,
+		Evict:    make(chan struct{}),
+		Outbound: make(chan any, 4),
+	}
 	s.hub.Register(sess)
 	s.logger.Info("ws connected", "remote", remote, "pv", pv)
 
@@ -174,32 +183,60 @@ func (s *server) serveConn(conn *websocket.Conn, remote string) {
 		s.logger.Info("ws disconnected", "remote", remote)
 	}()
 
-	// Discard every post-hello frame in v1. The read loop lives on its own
-	// goroutine so the handler can also wait on eviction.
+	// The read loop lives on its own goroutine so the handler's select can also
+	// wait on eviction and on hub-delivered outbound frames. Post-hello frames
+	// are decoded; only ready / busy do anything — every other frame, and any
+	// decode error, is ignored (the v1 discard behaviour).
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
 		for {
-			if _, _, err := conn.Read(ctx); err != nil {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
 				return
+			}
+			msg, err := proto.Decode(data)
+			if err != nil {
+				continue
+			}
+			switch msg.(type) {
+			case proto.Ready:
+				s.hub.Ready(sess)
+			case proto.Busy:
+				s.hub.Busy(sess)
 			}
 		}
 	}()
 
-	select {
-	case <-readDone:
-		// Client closed the socket or the connection dropped. The deferred
-		// Unregister removes the key.
-	case <-sess.Evict:
-		// A newer connection for this key took over. Tell this client its
-		// session ended, close normally, then cancel the connection context so
-		// the discard-loop read returns even if the close alone does not unblock
-		// it, and wait for that loop to unwind.
-		s.writeFrame(ctx, conn, proto.SessionEnded{})
-		_ = conn.Close(websocket.StatusNormalClosure, "")
-		cancel()
-		<-readDone
-		s.logger.Info("ws taken over", "remote", remote)
+	for {
+		select {
+		case <-readDone:
+			// Client closed the socket or the connection dropped. The deferred
+			// Unregister removes the key, drops any queue entry, and tears down
+			// any pairing (the peer gets a session_ended).
+			return
+		case msg := <-sess.Outbound:
+			// The hub matched or tore down this session. This handler is the
+			// sole writer for conn, so the frame is written here.
+			s.writeFrame(ctx, conn, msg)
+			switch msg.(type) {
+			case proto.Matched:
+				s.logger.Info("ws matched", "remote", remote)
+			case proto.SessionEnded:
+				s.logger.Info("ws session ended", "remote", remote)
+			}
+		case <-sess.Evict:
+			// A newer connection for this key took over. Tell this client its
+			// session ended, close normally, then cancel the connection context
+			// so the read loop returns even if the close alone does not unblock
+			// it, and wait for that loop to unwind.
+			s.writeFrame(ctx, conn, proto.SessionEnded{})
+			_ = conn.Close(websocket.StatusNormalClosure, "")
+			cancel()
+			<-readDone
+			s.logger.Info("ws taken over", "remote", remote)
+			return
+		}
 	}
 }
 

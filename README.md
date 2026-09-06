@@ -26,7 +26,18 @@ exposes exactly two HTTP routes:
   `bad_frame`) then a close. On a valid `hello` the account key is registered in
   a single-writer connection registry; a later `hello` for a live key takes over
   and the displaced connection receives `session_ended` then a normal close.
-  Post-`hello` frames are read and discarded in this epic.
+  Post-`hello`, `ready` and `busy` frames now drive an in-memory strict-FIFO
+  wait queue and a single-writer pairing loop owned by the same hub goroutine:
+  `ready` enqueues the account key, `busy` removes it. A waiting key that is not
+  paired at once gets a `queued` frame; when the queue head pairs with the first
+  eligible successor both peers get a `matched` frame carrying a backend-minted
+  opaque `session_id` (`pseudonym` / `blurb` / `opener` are empty until later
+  stories). Leaving the queue unmatched — via `busy`, a disconnect, or a
+  takeover — is silent. Tearing down an active pairing (a peer's `busy` or
+  disconnect) sends the surviving peer a bare `session_ended` with no re-enqueue.
+  All queue, pairing, and `session_id` state is in-memory and dies with the
+  process. Other post-`hello` frames (`chat_msg`, `leave`, undecodable) are still
+  read and discarded in this epic.
 - **`GET /status`** — returns `200` with `application/json` body
   `{"concurrent_users": N}`, where `N` is the number of distinct connected
   account keys. A non-GET `/status` is `405`; every other path is `404`.
