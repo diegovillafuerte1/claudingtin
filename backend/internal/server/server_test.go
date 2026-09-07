@@ -745,10 +745,15 @@ func TestUnpairedChatMsgIsIgnored(t *testing.T) {
 	waitCount(t, h.hub, 1)
 
 	writeMsg(t, a, proto.ChatMsg{ClientMsgID: "c1", Text: "nobody home"})
-	expectNoFrame(t, a, 300*time.Millisecond)
+
+	// Count stays 1 whether or not the relay has been processed yet (an unpaired
+	// chat_msg is a no-op either way), so this needs no happens-before. It must
+	// come before expectNoFrame, though: that call's read-timeout makes
+	// coder/websocket close the client conn, which asynchronously drops the count.
 	if got := h.hub.Count(); got != 1 {
 		t.Fatalf("hub.Count = %d, want 1 (an unpaired chat_msg changes nothing)", got)
 	}
+	expectNoFrame(t, a, 300*time.Millisecond)
 }
 
 // TestRelayRoundTripP90UnderCeiling is a coarse latency check: ~50 relayed
