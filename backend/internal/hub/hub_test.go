@@ -2,10 +2,13 @@ package hub
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/diegovillafuerte1/claudingtin/backend"
 	"github.com/diegovillafuerte1/claudingtin/proto"
 )
 
@@ -217,8 +220,17 @@ func TestTwoReadyMatchWithEqualSessionID(t *testing.T) {
 	if ma.SessionID != mb.SessionID {
 		t.Fatalf("session_id differs between peers: %q vs %q", ma.SessionID, mb.SessionID)
 	}
-	if ma.Pseudonym != "" || ma.Blurb != "" || ma.Opener != "" {
-		t.Fatalf("pseudonym/blurb/opener must be empty in Story 2.1, got %#v", ma)
+	if ma.Opener == "" {
+		t.Fatal("matched opener is empty")
+	}
+	if ma.Opener != mb.Opener {
+		t.Fatalf("opener differs between peers: %q vs %q", ma.Opener, mb.Opener)
+	}
+	if !slices.Contains(backend.Openers(), ma.Opener) {
+		t.Fatalf("opener %q is not in the curated set", ma.Opener)
+	}
+	if ma.Pseudonym != "" || ma.Blurb != "" {
+		t.Fatalf("pseudonym/blurb must be empty in Epic 2, got %#v", ma)
 	}
 	expectNoOutbound(t, a)
 	expectNoOutbound(t, b)
@@ -272,6 +284,175 @@ func TestFIFOOrderWithThreeWaiters(t *testing.T) {
 		t.Fatal("C: expected a queued frame")
 	}
 	expectNoOutbound(t, c)
+}
+
+// TestOpenerRotationNeverRepeatsBackToBack forms len(Openers())+2 pairings in
+// sequence and checks the opener each pair receives: every one is a verbatim
+// entry of the curated set, no two consecutive pairs share an opener, and the
+// sequence walks the set in file order and wraps.
+func TestOpenerRotationNeverRepeatsBackToBack(t *testing.T) {
+	h, stop := startHub(t)
+	defer stop()
+
+	set := backend.Openers()
+	if len(set) < 2 {
+		t.Fatalf("curated set has %d entries, want >= 2", len(set))
+	}
+	n := len(set) + 2
+
+	got := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		a := newSession(fmt.Sprintf("rot-a-%d", i))
+		b := newSession(fmt.Sprintf("rot-b-%d", i))
+		h.Register(a)
+		h.Register(b)
+		h.Ready(a)
+		h.Ready(b)
+
+		ma := matchedFrame(t, a)
+		mb := matchedFrame(t, b)
+		if ma.Opener != mb.Opener {
+			t.Fatalf("pair %d: peers got different openers %q vs %q", i, ma.Opener, mb.Opener)
+		}
+		got = append(got, ma.Opener)
+	}
+
+	for i, o := range got {
+		if !slices.Contains(set, o) {
+			t.Errorf("pair %d opener %q is not in the curated set", i, o)
+		}
+		if i > 0 && o == got[i-1] {
+			t.Errorf("pair %d opener %q repeats the previous match's opener", i, o)
+		}
+		if want := set[i%len(set)]; o != want {
+			t.Errorf("pair %d opener = %q, want %q (round-robin, file order, wrapping)", i, o, want)
+		}
+	}
+}
+
+// TestMultiplePairsInOneDrainGetConsecutiveOpeners covers the matrix row
+// "Multiple pairs in one drain": a single drainQueue invocation forms two pairs,
+// so its `for len(p.queue) >= 2` loop calls nextOpener() twice — the two pairs
+// must get consecutive, distinct entries from the rotation (set[0] then set[1]).
+//
+// Reaching a >=4-deep queue of pairable sessions before a drain needs the
+// bounded scan (maxScan) to hide the pairable waiters from a blocked head:
+// the head plus maxScan same-key fillers sit ahead of two other-key waiters, so
+// nothing pairs while the queue is built (cursor stays at 0). Removing the
+// blocked head re-drains the now-66-deep queue and forms both pairs at once.
+//
+// These sessions are never Register()ed: readyCmd/busyCmd act on the session
+// pointer alone, and Register()ing many sessions under one key would trigger
+// takeover eviction that dismantles the blocked queue this test builds.
+func TestMultiplePairsInOneDrainGetConsecutiveOpeners(t *testing.T) {
+	h, stop := startHub(t)
+	defer stop()
+
+	set := backend.Openers()
+	if len(set) < 2 {
+		t.Fatalf("curated set has %d entries, want >= 2", len(set))
+	}
+
+	const blockedKey, waiterKey = "blocked", "waiter"
+
+	// Blocked head: its bounded scan will only ever reach the fillers.
+	head := newSession(blockedKey)
+	h.Ready(head)
+	if _, ok := recvOutbound(t, head).(proto.Queued); !ok {
+		t.Fatal("head: expected queued")
+	}
+
+	// Exactly maxScan fillers, same key as the head. With the head at index 0 the
+	// scan (i = 1..maxScan) covers indices 1..maxScan, i.e. every filler and
+	// nothing past them.
+	fillers := make([]*Session, maxScan)
+	for i := range fillers {
+		f := newSession(blockedKey)
+		fillers[i] = f
+		h.Ready(f)
+		if _, ok := recvOutbound(t, f).(proto.Queued); !ok {
+			t.Fatalf("filler %d: expected queued (head must stay blocked)", i)
+		}
+	}
+
+	// Two pairable waiters, past the scan window, so the head stays blocked and
+	// no pair forms while they enqueue.
+	b, c := newSession(waiterKey), newSession(waiterKey)
+	for _, s := range []*Session{b, c} {
+		h.Ready(s)
+		if _, ok := recvOutbound(t, s).(proto.Queued); !ok {
+			t.Fatal("waiter: expected queued (head must still be blocking the drain)")
+		}
+	}
+
+	// Drop the blocked head. Its removeFromQueue + re-drain now walks the queue
+	// and forms (filler0, b) then (filler1, c) in one drainQueue call.
+	h.Busy(head)
+
+	ob := matchedFrame(t, b)
+	oc := matchedFrame(t, c)
+	of0 := matchedFrame(t, fillers[0])
+	of1 := matchedFrame(t, fillers[1])
+
+	if ob.Opener != of0.Opener {
+		t.Fatalf("first pair peers disagree on opener: %q vs %q", ob.Opener, of0.Opener)
+	}
+	if oc.Opener != of1.Opener {
+		t.Fatalf("second pair peers disagree on opener: %q vs %q", oc.Opener, of1.Opener)
+	}
+	if ob.Opener != set[0] {
+		t.Fatalf("first pair opener = %q, want %q (set[0])", ob.Opener, set[0])
+	}
+	if oc.Opener != set[1] {
+		t.Fatalf("second pair opener = %q, want %q (set[1], the next rotation entry)", oc.Opener, set[1])
+	}
+	if ob.Opener == oc.Opener {
+		t.Fatalf("two pairs from one drain share opener %q", ob.Opener)
+	}
+}
+
+// TestTeardownDoesNotRewindOpenerCursor covers the matrix row "Teardown then
+// re-pair": after a pairing is torn down and both peers re-ready, they get the
+// NEXT opener in rotation — the cursor is not rewound by the teardown.
+func TestTeardownDoesNotRewindOpenerCursor(t *testing.T) {
+	h, stop := startHub(t)
+	defer stop()
+
+	set := backend.Openers()
+	if len(set) < 2 {
+		t.Fatalf("curated set has %d entries, want >= 2", len(set))
+	}
+
+	a, b := newSession("a"), newSession("b")
+	h.Register(a)
+	h.Register(b)
+	h.Ready(a)
+	h.Ready(b)
+
+	ma := matchedFrame(t, a)
+	mb := matchedFrame(t, b)
+	if ma.Opener != set[0] || mb.Opener != set[0] {
+		t.Fatalf("first pairing opener = %q / %q, want %q (set[0])", ma.Opener, mb.Opener, set[0])
+	}
+
+	// Tear the pairing down: A goes busy, B gets a bare session_ended.
+	h.Busy(a)
+	if _, ok := recvOutbound(t, b).(proto.SessionEnded); !ok {
+		t.Fatal("B: expected a bare session_ended after A went busy")
+	}
+
+	// Both re-ready and re-pair.
+	h.Ready(a)
+	h.Ready(b)
+
+	ma2 := matchedFrame(t, a)
+	mb2 := matchedFrame(t, b)
+	if ma2.Opener != mb2.Opener {
+		t.Fatalf("re-pair peers disagree on opener: %q vs %q", ma2.Opener, mb2.Opener)
+	}
+	if ma2.Opener != set[1] {
+		t.Fatalf("re-pair opener = %q, want %q (set[1]) — teardown must not rewind the cursor", ma2.Opener, set[1])
+	}
 }
 
 func TestBusyWhileQueuedIsSilent(t *testing.T) {
