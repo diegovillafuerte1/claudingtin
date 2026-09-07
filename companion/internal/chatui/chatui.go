@@ -11,16 +11,26 @@
 // one chat_msg on the wire (the Bubble Tea goroutine never writes the socket
 // itself). Inbound peer lines arrive as PeerMsg. The server never echoes a
 // chat_msg back to its sender, so there is no de-dup to do here. block / report
-// / leave raise a typed Intent for run to log content-free; the searching
-// spinner and the searching→matched "spin" are Story 2.5. There is no file /
+// / leave raise a typed Intent for run to log content-free. There is no file /
 // image / audio affordance anywhere in the surface or its key map, and no
 // read-receipt state is ever rendered.
+//
+// Scope note (Story 2.5): the *searching* spinner is a separate package
+// (internal/searchui). The "spin" that belongs here is the intro flourish — one
+// fixed row above the header that advances on a fixed tick, a fixed number of
+// times (well under ~1s total), then clears for good with a one-time viewport
+// growth. It lives entirely in the render path: it never gates key routing (the
+// textarea is focused from New and Update always routes a KeyPressMsg to it) and
+// it never touches message handling (a PeerMsg mid-flourish is appended
+// normally). It is bounded by a frame count, not a wall clock, so a test drives
+// it deterministically by feeding flourishTickMsg.
 package chatui
 
 import (
 	"crypto/rand"
 	"encoding/base64"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
@@ -49,6 +59,25 @@ const (
 // placeholderName stands in for a peer pseudonym until Epic 5 populates the
 // real profile. Warm, lowercase, never names the machinery.
 const placeholderName = "someone new"
+
+// The intro "spin": a fixed row shown above the header for the first few frames
+// after the surface opens, then gone for good. Bounded by the frame count, not
+// a wall clock — flourishInterval * len(flourishFrames) is well under a second,
+// and a test advances it deterministically by feeding flourishTickMsg.
+const flourishInterval = 90 * time.Millisecond
+
+var flourishFrames = []string{
+	"◐  here we go",
+	"◓  here we go",
+	"◑  here we go",
+	"◒  here we go",
+	"◐  here we go",
+	"◓  here we go",
+}
+
+// flourishTickMsg advances the intro flourish by one frame. It is scheduled only
+// while the flourish is still playing and never again once it is done.
+type flourishTickMsg struct{}
 
 // Intent is a content-free signal that the user reached for block, report, or
 // leave. Story 2.3 only surfaces it to run, which logs it; no proto frame is
@@ -176,6 +205,11 @@ type Model struct {
 	notify func(Intent)
 	send   func(clientMsgID, text string)
 
+	// flourishFrame is the current intro-flourish frame; flourishDone latches
+	// true once the fixed frame count is reached and the row is gone for good.
+	flourishFrame int
+	flourishDone  bool
+
 	width  int
 	height int
 }
@@ -217,8 +251,14 @@ func New(matched proto.Matched, opts ...Option) *Model {
 	return m
 }
 
-// Init satisfies tea.Model; it starts the input cursor blinking.
-func (m *Model) Init() tea.Cmd { return textarea.Blink }
+// Init satisfies tea.Model; it starts the input cursor blinking and kicks off
+// the bounded intro "spin" flourish.
+func (m *Model) Init() tea.Cmd { return tea.Batch(textarea.Blink, m.flourishTick()) }
+
+// flourishTick schedules the next intro-flourish frame.
+func (m *Model) flourishTick() tea.Cmd {
+	return tea.Tick(flourishInterval, func(time.Time) tea.Msg { return flourishTickMsg{} })
+}
 
 // Update satisfies tea.Model.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -261,7 +301,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case PeerMsg:
 		// Follow the newest line only if the reader was already at the bottom;
-		// don't yank them down from wherever they had scrolled.
+		// don't yank them down from wherever they had scrolled. The flourish
+		// state has no bearing here — a peer line mid-flourish is appended
+		// normally and is still in history once the flourish clears.
 		atBottom := m.vp.AtBottom()
 		m.history = append(m.history, entry{
 			id:   msg.ClientMsgID,
@@ -269,6 +311,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text: msg.Text,
 		})
 		m.syncHistory(atBottom)
+		return m, nil
+
+	case flourishTickMsg:
+		// Purely cosmetic: advance the intro row, and re-arm until the fixed
+		// frame count is spent. It never gates key routing or message handling.
+		if m.flourishDone {
+			return m, nil
+		}
+		m.flourishFrame++
+		if m.flourishFrame < len(flourishFrames) {
+			return m, m.flourishTick()
+		}
+		// Done for good: the row is dropped and the viewport grows by that one
+		// row, once. No further flourish ticks are scheduled.
+		m.flourishDone = true
+		m.relayout()
 		return m, nil
 	}
 
@@ -330,7 +388,7 @@ func (m *Model) relayout() {
 	}
 	m.input.SetWidth(m.width)
 
-	vpH := m.height - m.headerHeight() - m.controlsHeight() - inputHeight
+	vpH := m.height - m.headerHeight() - m.controlsHeight() - inputHeight - m.flourishHeight()
 	if vpH < 1 {
 		vpH = 1
 	}
@@ -379,6 +437,25 @@ func (m *Model) headerHeight() int {
 	return strings.Count(m.headerText(), "\n") + 1
 }
 
+// flourishHeight is the one row the intro "spin" occupies above the header while
+// it plays, and zero once it is done — relayout budgets for it so the viewport
+// grows by exactly that row, once, when the flourish clears.
+func (m *Model) flourishHeight() int {
+	if m.flourishDone {
+		return 0
+	}
+	return 1
+}
+
+// flourishRow is the current intro-flourish line. Callers must only use it while
+// flourishHeight() is 1.
+func (m *Model) flourishRow() string {
+	if m.flourishFrame < 0 || m.flourishFrame >= len(flourishFrames) {
+		return flourishFrames[0]
+	}
+	return flourishFrames[m.flourishFrame]
+}
+
 // controlsText is the always-visible affordance, rendered from the key bindings
 // so there is one source of truth. It names block, report, and leave and never
 // mentions files, attachments, or read receipts.
@@ -402,13 +479,17 @@ func (m *Model) controlsHeight() int {
 }
 
 func (m *Model) render() string {
-	return lipgloss.JoinVertical(
-		lipgloss.Left,
+	rows := make([]string, 0, 5)
+	if !m.flourishDone {
+		rows = append(rows, m.flourishRow())
+	}
+	rows = append(rows,
 		m.headerText(),
 		m.vp.View(),
 		m.input.View(),
 		m.controlsText(),
 	)
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
 // newClientMsgID mints the id an optimistic local echo is keyed by: 9 bytes

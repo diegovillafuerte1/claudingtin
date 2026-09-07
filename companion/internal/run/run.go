@@ -9,6 +9,15 @@
 // transitions collapses to just the settled state. After every (re)connect the
 // desired state is re-announced unconditionally — that is the whole of "resume
 // from the current transcript state".
+//
+// Two surfaces can take the pane from the status line. An inbound `queued`
+// frame raises the searching spinner (internal/searchui); an inbound `matched`
+// stops it — within the one select-case, so a chat_msg buffered behind the
+// matched waits rather than drops — and opens the chat surface
+// (internal/chatui), whose intro "spin" flourish plays as it settles. The
+// status line writes nothing while either surface owns the pane. A burst that
+// ends while searching just stops the spinner locally here; real
+// return-to-spinner + re-enqueue semantics are Epic 3.
 package run
 
 import (
@@ -23,6 +32,7 @@ import (
 
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/chatui"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/safety"
+	"github.com/diegovillafuerte1/claudingtin/companion/internal/searchui"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/statusline"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/transcript"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/wsclient"
@@ -126,6 +136,7 @@ type stateClient interface {
 	Run(ctx context.Context) wsclient.Result
 	SendState(ctx context.Context, msg any) error
 	Events() <-chan wsclient.Event
+	Queued() <-chan proto.Queued
 	Matched() <-chan proto.Matched
 	ChatMsgs() <-chan proto.ChatMsg
 	SendChat(ctx context.Context, m proto.ChatMsg) error
@@ -169,8 +180,34 @@ var newChatProgram = func(ctx context.Context, cfg Config, m proto.Matched, noti
 }
 
 // chatQuitGrace bounds how long teardown waits for a Quit()'d chat program to
-// return before Kill()ing it. Package var so tests can shrink it.
+// return before Kill()ing it. Package var so tests can shrink it. The searching
+// spinner's teardown reuses the same grace.
 var chatQuitGrace = 2 * time.Second
+
+// searchProgram is the slice of *tea.Program that loop drives for the searching
+// spinner, behind a seam so run_test.go can substitute a fake and never stand
+// up a real terminal. The spinner takes no callbacks and speaks nothing on the
+// wire — it is purely a pane animation — so the seam is smaller than
+// chatProgram's.
+type searchProgram interface {
+	Run() (tea.Model, error)
+	Quit()
+	Kill()
+}
+
+// newSearchProgram builds the real Bubble Tea searching-spinner program. It is
+// a package var so tests can replace it. Like the chat program it keeps the
+// process's own signal handling (WithoutSignalHandler) so a SIGINT still
+// cancels ctx and unwinds everything.
+var newSearchProgram = func(ctx context.Context, cfg Config) searchProgram {
+	return tea.NewProgram(
+		searchui.New(),
+		tea.WithContext(ctx),
+		tea.WithInput(cfg.In),
+		tea.WithOutput(cfg.Out),
+		tea.WithoutSignalHandler(),
+	)
+}
 
 // wireState is the companion's view of the model's think-time, as it maps to the
 // wire.
@@ -226,10 +263,20 @@ func loop(
 		chatSends   chan chatui.OutboundMsg
 	)
 
-	// showPhase is sl.Show gated on the chat surface: while the chat program
-	// owns the pane, the status line writes nothing.
+	// Searching-spinner state. It is launched on an inbound `queued` frame while
+	// the session is ready and unmatched, and torn down on `matched`, the burst
+	// ending, or any terminal path.
+	var (
+		search       searchProgram
+		searchActive bool
+		searchDone   chan struct{}
+	)
+
+	// showPhase is sl.Show gated on the two pane surfaces: while the chat
+	// program or the searching spinner owns the pane, the status line writes
+	// nothing.
 	showPhase := func(p statusline.Phase) {
-		if chatActive {
+		if chatActive || searchActive {
 			return
 		}
 		sl.Show(p)
@@ -297,6 +344,45 @@ func loop(
 		}
 	}
 
+	// launchSearch raises the searching spinner. Guarded by its one call site to
+	// !chatActive && !searchActive && desired == stateReady, so a redelivered
+	// `queued` after a reconnect, or one that lands after the burst already
+	// ended, never starts a second spinner or a stray flash.
+	launchSearch := func() {
+		search = newSearchProgram(ctx, cfg)
+		searchActive = true
+		searchDone = make(chan struct{})
+		go func(p searchProgram, done chan struct{}) {
+			_, _ = p.Run()
+			close(done)
+		}(search, searchDone)
+	}
+
+	// stopSearch tears the spinner down (Quit, then Kill on a grace timeout),
+	// mirroring stopChat, and hands the pane back to the status line when resume
+	// is true.
+	stopSearch := func(resume bool) {
+		if !searchActive {
+			return
+		}
+		search.Quit()
+		select {
+		case <-searchDone:
+		case <-time.After(chatQuitGrace):
+			search.Kill()
+			select {
+			case <-searchDone:
+			case <-time.After(chatQuitGrace):
+			}
+		}
+		searchActive = false
+		search = nil
+		searchDone = nil
+		if resume {
+			sl.Show(phaseFor(desired))
+		}
+	}
+
 	debounce := time.NewTimer(time.Hour)
 	debounce.Stop()
 	debouncePending := false
@@ -326,6 +412,12 @@ func loop(
 		if !haveSent || desired != sent {
 			pushState()
 		}
+		// A burst that ends while searching just drops the spinner locally and
+		// returns the pane to the waiting phrase — Epic 3 owns real
+		// return-to-spinner + re-enqueue.
+		if searchActive && desired == stateBusy {
+			stopSearch(true)
+		}
 		showPhase(phaseFor(desired))
 	}
 
@@ -334,6 +426,7 @@ func loop(
 	for {
 		select {
 		case <-ctx.Done():
+			stopSearch(false)
 			stopChat(false)
 			<-clientDone
 			return nil
@@ -343,6 +436,7 @@ func loop(
 			case wsclient.ResultPleaseUpdate:
 				// One notice, stop reconnecting, stay alive so the user can
 				// read it. No key, no transcript content.
+				stopSearch(false)
 				stopChat(false)
 				fmt.Fprintln(cfg.Err, "companion: the server asked this build to update; it will not reconnect until you install a newer companion")
 				sl.Show(statusline.PhaseUpdateNeeded)
@@ -351,9 +445,11 @@ func loop(
 			case wsclient.ResultSessionEnded:
 				// The process returns nil right after, so there is no status
 				// line to hand back to — resume:false avoids a stale flash.
+				stopSearch(false)
 				stopChat(false)
 				return nil
 			default: // ResultContextDone
+				stopSearch(false)
 				stopChat(false)
 				return nil
 			}
@@ -366,6 +462,7 @@ func loop(
 				// same select; if this branch is the one picked, it is still a
 				// normal shutdown — exit 0, never errWatchStopped.
 				if ctx.Err() != nil {
+					stopSearch(false)
 					stopChat(false)
 					<-clientDone
 					return nil
@@ -431,11 +528,23 @@ func loop(
 				showPhase(statusline.PhaseReconnecting)
 			}
 
+		case <-client.Queued():
+			// An inbound `queued` frame: the session is ready and left waiting.
+			// Raise the searching spinner — but only if nothing else owns the
+			// pane and the burst has not already ended. A redelivered `queued`
+			// after a reconnect finds searchActive already true and is a no-op.
+			if !chatActive && !searchActive && desired == stateReady {
+				launchSearch()
+			}
+
 		case m := <-client.Matched():
 			// Story 2.3: the first matched opens the chat surface. A stray
 			// second one while it is already up is ignored (Epic 3 owns
-			// re-enqueue and re-match).
+			// re-enqueue and re-match). The spinner (if any) is torn down here,
+			// in the same select-case as launchChat, so a chat_msg buffered
+			// behind this matched waits rather than drops.
 			if !chatActive {
+				stopSearch(false)
 				launchChat(m)
 			}
 
@@ -485,6 +594,11 @@ func loop(
 			// The chat program exited on its own (its context ended, or an
 			// internal error). Hand the pane back unless we are shutting down.
 			stopChat(ctx.Err() == nil)
+
+		case <-searchDone:
+			// The spinner program exited on its own (its context ended, or an
+			// internal error). Hand the pane back unless we are shutting down.
+			stopSearch(ctx.Err() == nil)
 		}
 	}
 }

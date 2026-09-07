@@ -59,6 +59,7 @@ func ackedConfigDir(t *testing.T) string {
 // fakeClient stands in for *wsclient.Client in the loop tests.
 type fakeClient struct {
 	events   chan wsclient.Event
+	queued   chan proto.Queued
 	matched  chan proto.Matched
 	chatMsgs chan proto.ChatMsg
 
@@ -76,6 +77,7 @@ type fakeClient struct {
 func newFakeClient() *fakeClient {
 	return &fakeClient{
 		events:   make(chan wsclient.Event, 8),
+		queued:   make(chan proto.Queued, 1),
 		matched:  make(chan proto.Matched, 1),
 		chatMsgs: make(chan proto.ChatMsg, 8),
 		stop:     make(chan struct{}),
@@ -132,6 +134,10 @@ func (f *fakeClient) setSendChatErr(err error) {
 }
 
 func (f *fakeClient) Events() <-chan wsclient.Event { return f.events }
+
+// Queued is nil-safe: a fakeClient built without a queued channel simply never
+// surfaces a queued frame.
+func (f *fakeClient) Queued() <-chan proto.Queued { return f.queued }
 
 // Matched is nil-safe: a fakeClient built without a matched channel simply
 // never surfaces a match.
@@ -1753,5 +1759,373 @@ func TestTeardownStopsInboundForwarding(t *testing.T) {
 	}
 	if len(f.receivedMsgs()) != before {
 		t.Fatalf("received message count changed after teardown: %d -> %d", before, len(f.receivedMsgs()))
+	}
+}
+
+// --- searching spinner launch / teardown (Story 2.5) ----------------------
+
+// fakeSearchProgram stands in for *tea.Program so the loop's spinner
+// launch/teardown is exercised with no PTY. Run blocks until Quit (or, when
+// ignoreQuit is set, only until Kill). quitDelay, when set, holds Run for that
+// long after Quit before it returns — a deterministic window during which
+// run.loop is provably still inside the `matched` select-case (spinner Quit
+// called, chat program not yet built) so a frame parked behind the matched can
+// be shown to wait rather than drop, while the teardown still counts as a clean
+// Quit (quitDelay stays under the shrunk chatQuitGrace).
+type fakeSearchProgram struct {
+	quit       chan struct{}
+	kill       chan struct{}
+	ran        chan struct{}
+	ignoreQuit bool
+	quitDelay  time.Duration
+
+	mu     sync.Mutex
+	killed bool
+}
+
+func (f *fakeSearchProgram) Run() (tea.Model, error) {
+	close(f.ran)
+	if f.ignoreQuit {
+		<-f.kill
+	} else {
+		<-f.quit
+		if f.quitDelay > 0 {
+			time.Sleep(f.quitDelay)
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeSearchProgram) Quit() {
+	select {
+	case <-f.quit:
+	default:
+		close(f.quit)
+	}
+}
+
+func (f *fakeSearchProgram) Kill() {
+	f.mu.Lock()
+	f.killed = true
+	f.mu.Unlock()
+	select {
+	case <-f.kill:
+	default:
+		close(f.kill)
+	}
+	f.Quit()
+}
+
+func (f *fakeSearchProgram) wasKilled() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.killed
+}
+
+func (f *fakeSearchProgram) quitted() bool {
+	select {
+	case <-f.quit:
+		return true
+	default:
+		return false
+	}
+}
+
+// stubSearchProgram swaps newSearchProgram for a fake and hands back a channel
+// that yields each constructed fake. It shrinks the Kill grace (shared with the
+// chat program) so a test that wants the Kill path does not wait seconds.
+func stubSearchProgram(t *testing.T, opts ...func(*fakeSearchProgram)) <-chan *fakeSearchProgram {
+	t.Helper()
+	oldNew, oldGrace := newSearchProgram, chatQuitGrace
+	chatQuitGrace = 100 * time.Millisecond
+	made := make(chan *fakeSearchProgram, 4)
+	newSearchProgram = func(_ context.Context, _ Config) searchProgram {
+		f := &fakeSearchProgram{
+			quit: make(chan struct{}),
+			kill: make(chan struct{}),
+			ran:  make(chan struct{}),
+		}
+		for _, o := range opts {
+			o(f)
+		}
+		made <- f
+		return f
+	}
+	t.Cleanup(func() { newSearchProgram, chatQuitGrace = oldNew, oldGrace })
+	return made
+}
+
+func waitSearch(t *testing.T, made <-chan *fakeSearchProgram) *fakeSearchProgram {
+	t.Helper()
+	select {
+	case f := <-made:
+		select {
+		case <-f.ran:
+		case <-time.After(2 * time.Second):
+			t.Fatal("search program was constructed but never Run")
+		}
+		return f
+	case <-time.After(2 * time.Second):
+		t.Fatal("no search program constructed")
+		return nil
+	}
+}
+
+// readyThenQueued drives the loop to the ready state and then feeds a queued
+// frame, returning the constructed spinner fake.
+func readyThenQueued(t *testing.T, h *loopHarness, made <-chan *fakeSearchProgram) *fakeSearchProgram {
+	t.Helper()
+	h.events <- transcript.Event{Kind: transcript.TurnStart}
+	h.waitSent(t, "ready")
+	h.client.queued <- proto.Queued{}
+	return waitSearch(t, made)
+}
+
+// TestQueuedLaunchesSpinnerAndSuppressesStatusLine: an inbound queued frame on a
+// ready session raises the spinner, and while it owns the pane the status line
+// writes nothing — but wire frames still flow.
+func TestQueuedLaunchesSpinnerAndSuppressesStatusLine(t *testing.T) {
+	made := stubSearchProgram(t)
+	h := startLoop(t)
+
+	readyThenQueued(t, h, made)
+
+	time.Sleep(40 * time.Millisecond)
+	snapshot := h.out.String()
+
+	// A reconnect notice and a Connected re-announce — the Connected still puts a
+	// frame on the wire (only sl.Show is gated), which also synchronises the
+	// assertion below.
+	h.client.events <- wsclient.Event{Kind: wsclient.Reconnecting}
+	h.client.events <- wsclient.Event{Kind: wsclient.Connected}
+	h.waitSent(t, "ready", "ready")
+
+	time.Sleep(60 * time.Millisecond)
+	if got := h.out.String(); got != snapshot {
+		t.Fatalf("status line wrote while the spinner was active:\nbefore: %q\nafter:  %q", snapshot, got)
+	}
+}
+
+// TestInstantMatchNeverConstructsASpinner: a matched that arrives with no prior
+// queued opens the chat surface directly and never builds a search program.
+func TestInstantMatchNeverConstructsASpinner(t *testing.T) {
+	madeSearch := stubSearchProgram(t)
+	madeChat := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	waitChat(t, madeChat)
+
+	select {
+	case <-madeSearch:
+		t.Fatal("an instant match still constructed a searching spinner")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestMatchedAfterQueuedStopsSpinnerThenLaunchesChat: on matched the spinner is
+// torn down (clean Quit, not Kill) before the chat program is constructed, and a
+// chat_msg that lands behind the matched — while run.loop is still inside that
+// one select-case — waits rather than drops.
+//
+// The spinner fake holds its Run for quitDelay after Quit, so the moment
+// sf.quitted() is observed the loop is provably parked in stopSearch's grace
+// select, mid-`matched`-case, with the chat program not yet built. The "pre"
+// chat_msg pushed into that window must still reach the surface once the case
+// completes. (It is sent after sf.quitted() rather than before the matched to
+// avoid an artificial Matched()/ChatMsgs() select race that run.loop does not
+// arbitrate — the real "buffered behind matched" guarantee is about wsclient
+// buffering while run.loop is busy in the case, which is exactly what this
+// pins.)
+func TestMatchedAfterQueuedStopsSpinnerThenLaunchesChat(t *testing.T) {
+	madeSearch := stubSearchProgram(t, func(f *fakeSearchProgram) {
+		f.quitDelay = 40 * time.Millisecond // < the 100ms shrunk chatQuitGrace
+	})
+	madeChat := stubChatProgram(t)
+	h := startLoop(t)
+
+	sf := readyThenQueued(t, h, madeSearch)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+
+	// run.loop has entered the matched case and called search.Quit(); it is now
+	// parked in stopSearch waiting out quitDelay, chat program not yet built.
+	waitUntil(t, "run.loop inside the matched case (spinner Quit called)", sf.quitted)
+
+	// Park a peer line behind the matched while the loop is still busy.
+	h.client.chatMsgs <- proto.ChatMsg{ClientMsgID: "pre", Text: "buffered ahead of the surface"}
+
+	cf := waitChat(t, madeChat)
+
+	// The spinner teardown was a clean Quit, not a Kill.
+	if sf.wasKilled() {
+		t.Fatal("matched Killed the spinner instead of a clean Quit")
+	}
+
+	// The line parked behind the matched was not dropped.
+	waitUntil(t, "the buffered peer line forwarded to the chat surface", func() bool {
+		for _, m := range cf.receivedMsgs() {
+			if pm, ok := m.(chatui.PeerMsg); ok && pm.ClientMsgID == "pre" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// TestBurstEndWhileSearchingStopsSpinner: a TurnEnd while the spinner is up
+// drops it on the debounce flush and the waiting phrase returns.
+func TestBurstEndWhileSearchingStopsSpinner(t *testing.T) {
+	made := stubSearchProgram(t)
+	h := startLoop(t)
+
+	sf := readyThenQueued(t, h, made)
+
+	h.events <- transcript.Event{Kind: transcript.TurnEnd}
+	h.waitSent(t, "ready", "busy")
+
+	waitUntil(t, "the spinner torn down on the burst end", sf.quitted)
+	if sf.wasKilled() {
+		t.Fatal("the burst-end teardown Killed the spinner instead of a clean Quit")
+	}
+	waitUntil(t, "the waiting phrase back on the status line", func() bool {
+		return strings.Contains(h.out.String(), "waiting for the next quiet moment")
+	})
+}
+
+// TestRedeliveredQueuedDoesNotStartASecondSpinner: a second queued frame while
+// the spinner is already up constructs nothing new.
+func TestRedeliveredQueuedDoesNotStartASecondSpinner(t *testing.T) {
+	made := stubSearchProgram(t)
+	h := startLoop(t)
+
+	readyThenQueued(t, h, made)
+
+	h.client.queued <- proto.Queued{}
+	select {
+	case <-made:
+		t.Fatal("a redelivered queued constructed a second spinner")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestQueuedAfterBurstEndedDoesNotStartSpinner: with desired already busy, an
+// inbound queued raises no spinner.
+func TestQueuedAfterBurstEndedDoesNotStartSpinner(t *testing.T) {
+	made := stubSearchProgram(t)
+	h := startLoop(t)
+
+	// Never entered the ready state: desired is busy.
+	h.client.queued <- proto.Queued{}
+	select {
+	case <-made:
+		t.Fatal("queued started a spinner while the session was busy")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestSessionEndedTearsDownSpinner: a terminal clientDone result stops the
+// spinner and the loop returns nil.
+func TestSessionEndedTearsDownSpinner(t *testing.T) {
+	made := stubSearchProgram(t)
+	h := startLoop(t)
+
+	sf := readyThenQueued(t, h, made)
+
+	h.client.endRunWith(wsclient.ResultSessionEnded)
+
+	waitUntil(t, "the spinner torn down on session_ended", sf.quitted)
+	select {
+	case err := <-h.done:
+		if err != nil {
+			t.Fatalf("loop returned %v on session_ended, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop did not return after session_ended while searching")
+	}
+}
+
+// TestPleaseUpdateTearsDownSpinner: the please_update terminal path (I/O matrix
+// "Terminal path while searching") stops the spinner cleanly, shows the
+// update-needed notice, stays alive so the user can read it, then exits nil on
+// a subsequent cancel.
+func TestPleaseUpdateTearsDownSpinner(t *testing.T) {
+	made := stubSearchProgram(t)
+	h := startLoop(t)
+
+	sf := readyThenQueued(t, h, made)
+
+	h.client.endRunWith(wsclient.ResultPleaseUpdate)
+
+	waitUntil(t, "the spinner torn down on please_update", sf.quitted)
+	if sf.wasKilled() {
+		t.Fatal("please_update Killed the spinner instead of a clean Quit")
+	}
+	waitUntil(t, "the update-needed status line", func() bool {
+		return strings.Contains(h.out.String(), "out of date")
+	})
+	if s := h.errBuf.String(); !strings.Contains(s, "update") {
+		t.Fatalf("stderr = %q, want an update notice", s)
+	}
+
+	// The process stays alive until it is cancelled.
+	select {
+	case err := <-h.done:
+		t.Fatalf("loop returned %v after please_update; it must stay alive", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	h.cancel()
+	select {
+	case err := <-h.done:
+		if err != nil {
+			t.Fatalf("loop returned %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop did not return after cancel following please_update")
+	}
+}
+
+// TestContextCancelTearsDownSpinner: a ctx cancel stops the spinner and the loop
+// returns nil.
+func TestContextCancelTearsDownSpinner(t *testing.T) {
+	made := stubSearchProgram(t)
+	h := startLoop(t)
+
+	sf := readyThenQueued(t, h, made)
+
+	h.cancel()
+
+	waitUntil(t, "the spinner torn down on ctx cancel", sf.quitted)
+	select {
+	case err := <-h.done:
+		if err != nil {
+			t.Fatalf("loop returned %v on ctx cancel, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop did not return after ctx cancel while searching")
+	}
+}
+
+// TestSpinnerKilledWhenQuitIgnored: a wedged spinner that never returns on Quit
+// is Kill()ed after the grace window and the loop still tears down and exits.
+func TestSpinnerKilledWhenQuitIgnored(t *testing.T) {
+	made := stubSearchProgram(t, func(f *fakeSearchProgram) { f.ignoreQuit = true })
+	h := startLoop(t)
+
+	sf := readyThenQueued(t, h, made)
+
+	h.client.endRunWith(wsclient.ResultSessionEnded)
+
+	select {
+	case err := <-h.done:
+		if err != nil {
+			t.Fatalf("loop returned %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop hung on a Quit-ignoring spinner instead of Kill()ing it")
+	}
+	if !sf.wasKilled() {
+		t.Fatal("teardown did not Kill() a spinner that ignored Quit")
 	}
 }
