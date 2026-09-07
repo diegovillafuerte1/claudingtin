@@ -41,8 +41,17 @@ exposes exactly two HTTP routes:
   or a takeover — is silent. Tearing down an active pairing (a peer's `busy` or
   disconnect) sends the surviving peer a bare `session_ended` with no re-enqueue.
   All queue, pairing, `session_id`, and opener-rotation-cursor state is in-memory
-  and dies with the process. Other post-`hello` frames (`chat_msg`, `leave`,
-  undecodable) are still read and discarded in this epic.
+  and dies with the process. A post-`hello` `chat_msg` from a paired connection
+  is relayed in-memory to that pairing's other peer only — never echoed back to
+  the sender, never parsed, trimmed, or length-checked, and never logged (not
+  even a content-free line, which would still leak chat volume and timing). A
+  `chat_msg` from a connection that is not paired — never matched, or the pairing
+  already ended — is dropped silently with no `error` frame. Text is UTF-8;
+  `Encode`/`Decode` replace any invalid bytes with U+FFFD in transit. Relay is
+  best-effort and in-order single-hop: v1 has no acknowledgement or retry, so a
+  line can be dropped if the peer's delivery buffer is full (the sender's
+  optimistic local echo is always shown regardless). Other post-`hello` frames
+  (`leave`, undecodable) are still read and discarded in this epic.
 - **`GET /status`** — returns `200` with `application/json` body
   `{"concurrent_users": N}`, where `N` is the number of distinct connected
   account keys. A non-GET `/status` is `405`; every other path is `404`.
@@ -93,10 +102,16 @@ attachment control anywhere, and no read-receipt state is ever shown. Peer and
 opener text is rendered inert — printable characters and newlines only; every
 ESC / control byte is dropped so no ANSI, CSI, or OSC sequence reaches the
 terminal, and markup and links are shown as the literal characters typed, never
-interpreted. In this build nothing is put on the wire: pressing Enter appends
-your own line to the history optimistically (keyed by a fresh `client_msg_id`),
-and block / report / leave only raise a content-free intent the companion logs.
-The real message relay and the searching → matched "spin" are later stories.
+interpreted. Pressing Enter appends your own line to the history optimistically
+(keyed by a fresh `client_msg_id`) and then puts one `chat_msg` on the wire; the
+backend relays it to your peer only and never echoes it back, so the optimistic
+line is the sole local copy. A whitespace-only Enter stays local and sends
+nothing. An inbound peer `chat_msg` is rendered inert as a new history line; if
+it arrives with no chat surface up it is dropped. If a line cannot be sent (the
+socket is down) the companion prints one content-free "a chat line could not be
+sent" notice through the surface and carries on. block / report / leave only
+raise a content-free intent the companion logs. The searching → matched "spin"
+is a later story.
 
 ### First run
 

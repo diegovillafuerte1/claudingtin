@@ -4,10 +4,12 @@
 // touches that state only by sending a command on a channel (architecture
 // decision AD-8). The hub goroutine never
 // performs network I/O and writes no logs — a takeover only closes the displaced
-// session's evict channel, and a match or teardown only does a non-blocking send
-// of a ready-to-write proto frame onto each Session.Outbound channel that the
-// connection handler drains. Sending frames and closing sockets happens on the
-// connection handler's own goroutine.
+// session's evict channel; a match, teardown, or chat relay only does a
+// non-blocking send of a ready-to-write proto frame onto a Session.Outbound
+// channel that the connection handler drains. A relay sends the sender's
+// proto.ChatMsg to its paired peer only — never back to the sender, and a no-op
+// when the sender is not paired. Sending frames and closing sockets happens on
+// the connection handler's own goroutine.
 package hub
 
 import (
@@ -44,11 +46,17 @@ type readyCmd struct{ s *Session }
 
 type busyCmd struct{ s *Session }
 
+type chatMsgCmd struct {
+	s   *Session
+	msg proto.ChatMsg
+}
+
 func (registerCmd) isCommand()   {}
 func (unregisterCmd) isCommand() {}
 func (countCmd) isCommand()      {}
 func (readyCmd) isCommand()      {}
 func (busyCmd) isCommand()       {}
+func (chatMsgCmd) isCommand()    {}
 
 // maxScan bounds how far past the queue head the pairing loop looks for an
 // eligible successor before the head simply waits — the bounded scan AD-8 calls
@@ -74,10 +82,10 @@ func New() *Hub {
 // Run owns the registry map, the FIFO wait queue, the active pairings, the
 // session_id mint, and the opener rotation cursor, and consumes the command
 // channel until ctx is cancelled. It
-// performs no network I/O and writes no logs: on a match or teardown it does a
-// non-blocking send of a ready-to-write proto value onto each Session.Outbound,
-// and the connection handler — the sole writer for that socket — drains it. Run
-// must be called exactly once.
+// performs no network I/O and writes no logs: on a match, teardown, or chat
+// relay it does a non-blocking send of a ready-to-write proto value onto a
+// Session.Outbound, and the connection handler — the sole writer for that
+// socket — drains it. Run must be called exactly once.
 func (h *Hub) Run(ctx context.Context) {
 	defer close(h.stopped)
 
@@ -154,6 +162,13 @@ func (h *Hub) Run(ctx context.Context) {
 				// the Epic-4 eligibility seam — under a narrower predicate a
 				// blocking head leaving can free the sessions behind it.
 				p.drainQueue(eligible)
+			case chatMsgCmd:
+				// Route a chat line to the sender's paired peer only. This is a
+				// pure read of p.pairings plus the same non-blocking deliver the
+				// match/teardown paths use — no network I/O, no logging. If the
+				// sender is not paired (never matched, or the pairing already
+				// ended) the frame is dropped silently: no delivery, no error.
+				p.relay(cmd.s, cmd.msg)
 			case countCmd:
 				cmd.reply <- len(sessions)
 			}
@@ -215,6 +230,19 @@ func (p *pairingState) teardownPair(s *Session) {
 	delete(p.pairings, s)
 	delete(p.pairings, peer)
 	deliver(peer, proto.SessionEnded{})
+}
+
+// relay hands msg to from's paired peer and to no one else — the sender is never
+// echoed its own line (the companion already showed it optimistically, keyed by
+// client_msg_id). It is a no-op if from is not paired: a chat line from a
+// session that was never matched, or whose pairing has already been torn down,
+// is dropped silently with no error frame. The frame reaches the peer only by
+// the same best-effort non-blocking deliver the match/teardown paths use; v1
+// does not ack or retry a chat_msg.
+func (p *pairingState) relay(from *Session, msg proto.ChatMsg) {
+	if peer, ok := p.pairings[from]; ok {
+		deliver(peer, msg)
+	}
 }
 
 // drainQueue pairs the queue head with its first eligible successor for as long
@@ -322,6 +350,15 @@ func (h *Hub) Ready(s *Session) {
 // its pairing and sends the surviving peer a bare session_ended if it is paired.
 func (h *Hub) Busy(s *Session) {
 	h.send(busyCmd{s: s})
+}
+
+// Relay delivers msg to s's paired peer only, never back to s; it is a no-op if
+// s is not paired (never matched, or the pairing already ended). Delivery is
+// best-effort non-blocking on the peer's Outbound channel — v1 does not ack or
+// retry a chat_msg — and the hub goroutine does no network I/O and no logging
+// for it.
+func (h *Hub) Relay(s *Session, msg proto.ChatMsg) {
+	h.send(chatMsgCmd{s: s, msg: msg})
 }
 
 // Count returns the number of distinct connected account keys. It returns 0 if

@@ -127,6 +127,8 @@ type stateClient interface {
 	SendState(ctx context.Context, msg any) error
 	Events() <-chan wsclient.Event
 	Matched() <-chan proto.Matched
+	ChatMsgs() <-chan proto.ChatMsg
+	SendChat(ctx context.Context, m proto.ChatMsg) error
 }
 
 // chatProgram is the slice of *tea.Program that loop drives, behind a seam so
@@ -139,6 +141,7 @@ type stateClient interface {
 type chatProgram interface {
 	Run() (tea.Model, error)
 	Println(...any)
+	Send(tea.Msg)
 	Quit()
 	Kill()
 }
@@ -147,9 +150,17 @@ type chatProgram interface {
 // package var so tests can replace it. Signals stay with the process's own
 // signal.NotifyContext (WithoutSignalHandler) so a SIGINT still cancels ctx and
 // unwinds everything, chat included.
-var newChatProgram = func(ctx context.Context, cfg Config, m proto.Matched, notify func(chatui.Intent)) chatProgram {
+// newChatModel builds the chat surface model with its callbacks wired. It is a
+// thin package var so a test can substitute a real *chatui.Model while capturing
+// the send closure run.loop handed it — exercising the real WithNotify/WithSend
+// wiring without a PTY, which the wholesale newChatProgram stub cannot.
+var newChatModel = func(m proto.Matched, notify func(chatui.Intent), send func(clientMsgID, text string)) tea.Model {
+	return chatui.New(m, chatui.WithNotify(notify), chatui.WithSend(send))
+}
+
+var newChatProgram = func(ctx context.Context, cfg Config, m proto.Matched, notify func(chatui.Intent), send func(clientMsgID, text string)) chatProgram {
 	return tea.NewProgram(
-		chatui.New(m, chatui.WithNotify(notify)),
+		newChatModel(m, notify, send),
 		tea.WithContext(ctx),
 		tea.WithInput(cfg.In),
 		tea.WithOutput(cfg.Out),
@@ -212,6 +223,7 @@ func loop(
 		chatActive  bool
 		chatDone    chan struct{}
 		chatIntents chan chatui.Intent
+		chatSends   chan chatui.OutboundMsg
 	)
 
 	// showPhase is sl.Show gated on the chat surface: while the chat program
@@ -235,7 +247,20 @@ func loop(
 			default:
 			}
 		}
-		chat = newChatProgram(ctx, cfg, m, notify)
+		chatSends = make(chan chatui.OutboundMsg, 32)
+		cs := chatSends
+		send := func(clientMsgID, text string) {
+			// Fires synchronously inside the chat model's Update. Non-blocking:
+			// the actual socket write is done by loop below, off this goroutine,
+			// so a slow socket can never stall the UI. A full buffer during
+			// teardown just drops the line — the optimistic echo already showed
+			// it and v1 has no ack.
+			select {
+			case cs <- chatui.OutboundMsg{ClientMsgID: clientMsgID, Text: text}:
+			default:
+			}
+		}
+		chat = newChatProgram(ctx, cfg, m, notify, send)
 		chatActive = true
 		chatDone = make(chan struct{})
 		go func(p chatProgram, done chan struct{}) {
@@ -265,6 +290,7 @@ func loop(
 		chatActive = false
 		chat = nil
 		chatIntents = nil
+		chatSends = nil
 		chatDone = nil
 		if resume {
 			sl.Show(phaseFor(desired))
@@ -411,6 +437,23 @@ func loop(
 			// re-enqueue and re-match).
 			if !chatActive {
 				launchChat(m)
+			}
+
+		case cm := <-client.ChatMsgs():
+			// An inbound peer line. Forward it to the live chat surface as a
+			// PeerMsg; if no chat is active it is dropped (no panic, nothing to
+			// cfg.Out).
+			if chatActive && chat != nil {
+				chat.Send(chatui.PeerMsg{ClientMsgID: cm.ClientMsgID, Text: cm.Text})
+			}
+
+		case om := <-chatSends:
+			// The chat surface echoed the user's own line optimistically and
+			// asked us to put it on the wire. This is the only goroutine that
+			// writes the socket for chat. On failure, one content-free line
+			// through the program — no text, no id, nothing raw to the tty.
+			if err := client.SendChat(ctx, proto.ChatMsg{ClientMsgID: om.ClientMsgID, Text: om.Text}); err != nil && chat != nil {
+				chat.Println("companion: a chat line could not be sent")
 			}
 
 		case i := <-chatIntents:

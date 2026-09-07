@@ -58,23 +58,27 @@ func ackedConfigDir(t *testing.T) string {
 
 // fakeClient stands in for *wsclient.Client in the loop tests.
 type fakeClient struct {
-	events  chan wsclient.Event
-	matched chan proto.Matched
+	events   chan wsclient.Event
+	matched  chan proto.Matched
+	chatMsgs chan proto.ChatMsg
 
-	mu        sync.Mutex
-	sent      []any
-	sendErr   error         // returned by SendState when set
-	sendGate  chan struct{} // if non-nil, SendState blocks receiving from it
-	sendEntry chan struct{} // SendState signals here (non-blocking) on entering the gate
-	result    wsclient.Result
-	stop      chan struct{} // close to make Run return f.result
+	mu          sync.Mutex
+	sent        []any
+	chatSent    []proto.ChatMsg // payloads passed to SendChat
+	sendErr     error           // returned by SendState when set
+	sendChatErr error           // returned by SendChat when set
+	sendGate    chan struct{}   // if non-nil, SendState blocks receiving from it
+	sendEntry   chan struct{}   // SendState signals here (non-blocking) on entering the gate
+	result      wsclient.Result
+	stop        chan struct{} // close to make Run return f.result
 }
 
 func newFakeClient() *fakeClient {
 	return &fakeClient{
-		events:  make(chan wsclient.Event, 8),
-		matched: make(chan proto.Matched, 1),
-		stop:    make(chan struct{}),
+		events:   make(chan wsclient.Event, 8),
+		matched:  make(chan proto.Matched, 1),
+		chatMsgs: make(chan proto.ChatMsg, 8),
+		stop:     make(chan struct{}),
 	}
 }
 
@@ -121,11 +125,39 @@ func (f *fakeClient) setSendErr(err error) {
 	f.mu.Unlock()
 }
 
+func (f *fakeClient) setSendChatErr(err error) {
+	f.mu.Lock()
+	f.sendChatErr = err
+	f.mu.Unlock()
+}
+
 func (f *fakeClient) Events() <-chan wsclient.Event { return f.events }
 
 // Matched is nil-safe: a fakeClient built without a matched channel simply
 // never surfaces a match.
 func (f *fakeClient) Matched() <-chan proto.Matched { return f.matched }
+
+// ChatMsgs is nil-safe: a fakeClient built without a chatMsgs channel simply
+// never surfaces a peer line.
+func (f *fakeClient) ChatMsgs() <-chan proto.ChatMsg { return f.chatMsgs }
+
+func (f *fakeClient) SendChat(_ context.Context, m proto.ChatMsg) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sendChatErr != nil {
+		return f.sendChatErr
+	}
+	f.chatSent = append(f.chatSent, m)
+	return nil
+}
+
+func (f *fakeClient) chatSentFrames() []proto.ChatMsg {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]proto.ChatMsg, len(f.chatSent))
+	copy(out, f.chatSent)
+	return out
+}
 
 func (f *fakeClient) endRunWith(r wsclient.Result) {
 	f.result = r
@@ -1217,14 +1249,17 @@ func TestRunGateAbortReturnsNil(t *testing.T) {
 // through the program.
 type fakeChatProgram struct {
 	notify     func(chatui.Intent)
+	send       func(clientMsgID, text string)
+	model      tea.Model // the real model newChatModel built, never Run by the fake
 	quit       chan struct{}
 	kill       chan struct{}
 	ran        chan struct{}
 	ignoreQuit bool
 
-	mu     sync.Mutex
-	killed bool
-	prints []string
+	mu       sync.Mutex
+	killed   bool
+	prints   []string
+	received []tea.Msg
 }
 
 func (f *fakeChatProgram) Run() (tea.Model, error) {
@@ -1241,6 +1276,20 @@ func (f *fakeChatProgram) Println(args ...any) {
 	f.mu.Lock()
 	f.prints = append(f.prints, fmt.Sprint(args...))
 	f.mu.Unlock()
+}
+
+func (f *fakeChatProgram) Send(msg tea.Msg) {
+	f.mu.Lock()
+	f.received = append(f.received, msg)
+	f.mu.Unlock()
+}
+
+func (f *fakeChatProgram) receivedMsgs() []tea.Msg {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]tea.Msg, len(f.received))
+	copy(out, f.received)
+	return out
 }
 
 func (f *fakeChatProgram) Quit() {
@@ -1279,18 +1328,25 @@ func (f *fakeChatProgram) printed() string {
 // yields each constructed fake. It also shrinks the Kill grace so a test that
 // wants the Kill path does not wait seconds. Any opts are applied to every fake
 // it constructs (e.g. to set ignoreQuit).
+//
+// The fake still calls the real newChatModel with the loop's own notify/send
+// closures — so the real chatui.New(m, WithNotify, WithSend) wiring is exercised
+// on every run test — but never Runs the model, so no PTY and no goroutine
+// touches it.
 func stubChatProgram(t *testing.T, opts ...func(*fakeChatProgram)) <-chan *fakeChatProgram {
 	t.Helper()
 	oldNew, oldGrace := newChatProgram, chatQuitGrace
 	chatQuitGrace = 100 * time.Millisecond
 	made := make(chan *fakeChatProgram, 4)
-	newChatProgram = func(_ context.Context, _ Config, _ proto.Matched, notify func(chatui.Intent)) chatProgram {
+	newChatProgram = func(_ context.Context, _ Config, m proto.Matched, notify func(chatui.Intent), send func(clientMsgID, text string)) chatProgram {
 		f := &fakeChatProgram{
 			notify: notify,
+			send:   send,
 			quit:   make(chan struct{}),
 			kill:   make(chan struct{}),
 			ran:    make(chan struct{}),
 		}
+		f.model = newChatModel(m, notify, send)
 		for _, o := range opts {
 			o(f)
 		}
@@ -1530,5 +1586,172 @@ func TestBlockReportIntentsLoggedContentFree(t *testing.T) {
 	case <-f.quit:
 		t.Fatal("block/report stopped the chat program")
 	case <-time.After(120 * time.Millisecond):
+	}
+}
+
+// --- chat relay: inbound forward + outbound send (Story 2.4) --------------
+
+// TestInboundChatMsgForwardedToProgram: after a match, a peer proto.ChatMsg on
+// client.ChatMsgs() is handed to the live chat program as a chatui.PeerMsg with
+// fields intact.
+func TestInboundChatMsgForwardedToProgram(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	h.client.chatMsgs <- proto.ChatMsg{ClientMsgID: "peer-1", Text: "hi from them"}
+
+	waitUntil(t, "the forwarded PeerMsg", func() bool {
+		for _, m := range f.receivedMsgs() {
+			if pm, ok := m.(chatui.PeerMsg); ok && pm.ClientMsgID == "peer-1" && pm.Text == "hi from them" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// TestInboundChatMsgWithNoChatIsDropped: a peer line arriving with no active
+// chat surface is dropped — no panic, nothing to Out.
+func TestInboundChatMsgWithNoChatIsDropped(t *testing.T) {
+	h := startLoop(t)
+
+	h.client.chatMsgs <- proto.ChatMsg{ClientMsgID: "peer-1", Text: "nobody listening"}
+
+	// Give the loop a beat to process it, then confirm it is still healthy.
+	time.Sleep(40 * time.Millisecond)
+	h.events <- transcript.Event{Kind: transcript.TurnStart}
+	h.waitSent(t, "ready")
+	if strings.Contains(h.out.String(), "nobody listening") {
+		t.Fatalf("dropped peer line leaked to Out:\n%s", h.out.String())
+	}
+}
+
+// TestOutboundSendDrivesSendChat: the WithSend closure the loop passed into the
+// chat surface pushes onto chatSends, and the loop calls client.SendChat with
+// the right client_msg_id and text.
+func TestOutboundSendDrivesSendChat(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	f.send("cmid-1", "hello peer")
+
+	waitUntil(t, "the SendChat call", func() bool {
+		for _, m := range h.client.chatSentFrames() {
+			if m.ClientMsgID == "cmid-1" && m.Text == "hello peer" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// TestOutboundSendEndToEndThroughRealChatModel exercises the real wiring:
+// newChatModel builds an actual chatui.Model with the loop's own WithSend
+// closure, and a non-empty line + Enter driven straight through that model's
+// Update (no PTY, no tea.Program) must reach client.SendChat with the echoed
+// text. If chatui.WithSend(send) were dropped from newChatModel this fails.
+func TestOutboundSendEndToEndThroughRealChatModel(t *testing.T) {
+	oldModel := newChatModel
+	var (
+		realModel   tea.Model
+		capturedSet = make(chan struct{})
+	)
+	newChatModel = func(m proto.Matched, notify func(chatui.Intent), send func(clientMsgID, text string)) tea.Model {
+		realModel = chatui.New(m, chatui.WithNotify(notify), chatui.WithSend(send))
+		close(capturedSet)
+		return realModel
+	}
+	t.Cleanup(func() { newChatModel = oldModel })
+
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	waitChat(t, made)
+	<-capturedSet // realModel is now published (happens-before via the channel)
+
+	// Drive a line + Enter straight through the real model. Only this goroutine
+	// touches it — the fake program never Runs it.
+	for _, r := range "hello peer" {
+		next, _ := realModel.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		realModel = next
+	}
+	realModel, _ = realModel.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	waitUntil(t, "SendChat with the echoed line", func() bool {
+		for _, m := range h.client.chatSentFrames() {
+			if m.Text == "hello peer" && m.ClientMsgID != "" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// TestOutboundSendFailureLogsContentFree: when SendChat fails, the loop prints
+// exactly one content-free line through the program and does not tear down.
+func TestOutboundSendFailureLogsContentFree(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.setSendChatErr(wsclient.ErrNotConnected)
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	f.send("cmid-1", "secret chat text")
+
+	waitUntil(t, "the content-free send-failure line", func() bool {
+		return strings.Contains(f.printed(), "a chat line could not be sent")
+	})
+	if strings.Contains(f.printed(), "secret chat text") || strings.Contains(f.printed(), "cmid-1") {
+		t.Fatalf("send-failure log leaked chat content:\n%s", f.printed())
+	}
+	if strings.Contains(h.errBuf.String(), "a chat line could not be sent") {
+		t.Fatalf("send-failure log went raw to stderr, not through the program:\n%s", h.errBuf.String())
+	}
+	// Not torn down.
+	select {
+	case <-f.quit:
+		t.Fatal("a send failure tore the chat surface down")
+	case <-time.After(120 * time.Millisecond):
+	}
+}
+
+// TestTeardownStopsInboundForwarding: after the surface is torn down (leave), an
+// inbound peer line is no longer forwarded anywhere.
+func TestTeardownStopsInboundForwarding(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	f.notify(chatui.IntentLeave)
+	waitUntil(t, "the leave teardown", func() bool {
+		select {
+		case <-f.quit:
+			return true
+		default:
+			return false
+		}
+	})
+	before := len(f.receivedMsgs())
+
+	h.client.chatMsgs <- proto.ChatMsg{ClientMsgID: "peer-late", Text: "too late"}
+	time.Sleep(60 * time.Millisecond)
+
+	for _, m := range f.receivedMsgs() {
+		if pm, ok := m.(chatui.PeerMsg); ok && pm.ClientMsgID == "peer-late" {
+			t.Fatal("a peer line was forwarded to a torn-down chat program")
+		}
+	}
+	if len(f.receivedMsgs()) != before {
+		t.Fatalf("received message count changed after teardown: %d -> %d", before, len(f.receivedMsgs()))
 	}
 }

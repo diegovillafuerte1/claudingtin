@@ -5,13 +5,16 @@
 // block / report / leave affordance. Every peer- or opener-supplied string is
 // rendered through inert (this package's terminal-safe literal renderer).
 //
-// Scope note (Story 2.3): nothing here goes on the wire. Enter appends the
-// user's own line to the history optimistically, keyed by a fresh
-// client_msg_id; block / report / leave raise a typed Intent for run to log
-// content-free. The real message relay is Story 2.4; the searching spinner and
-// the searching→matched "spin" are Story 2.5. There is no file / image / audio
-// affordance anywhere in the surface or its key map, and no read-receipt state
-// is ever rendered.
+// Scope note (Story 2.4): the relay is now wired. Enter still appends the user's
+// own line to the history optimistically, keyed by a fresh client_msg_id, and
+// then hands that id + trimmed text to the WithSend callback so run.loop can put
+// one chat_msg on the wire (the Bubble Tea goroutine never writes the socket
+// itself). Inbound peer lines arrive as PeerMsg. The server never echoes a
+// chat_msg back to its sender, so there is no de-dup to do here. block / report
+// / leave raise a typed Intent for run to log content-free; the searching
+// spinner and the searching→matched "spin" are Story 2.5. There is no file /
+// image / audio affordance anywhere in the surface or its key map, and no
+// read-receipt state is ever rendered.
 package chatui
 
 import (
@@ -83,6 +86,15 @@ type PeerMsg struct {
 	Text        string
 }
 
+// OutboundMsg is the user's own line as it should go on the wire: the fresh
+// client_msg_id the optimistic echo was keyed by, and the trimmed text. It is
+// symmetric with PeerMsg. chatui does not send it — WithSend hands it to run,
+// which owns the socket write.
+type OutboundMsg struct {
+	ClientMsgID string
+	Text        string
+}
+
 // Option configures a Model at construction.
 type Option func(*Model)
 
@@ -91,6 +103,15 @@ type Option func(*Model)
 // intent content-free and, on leave, tear the surface down.
 func WithNotify(fn func(Intent)) Option {
 	return func(m *Model) { m.notify = fn }
+}
+
+// WithSend registers a callback invoked (synchronously, from Update) right after
+// the optimistic self line is appended on Enter, carrying that line's fresh
+// client_msg_id and its trimmed text. run passes one so run.loop — never this
+// Bubble Tea goroutine — does the actual socket write. A whitespace-only Enter
+// appends nothing and does not call it.
+func WithSend(fn func(clientMsgID, text string)) Option {
+	return func(m *Model) { m.send = fn }
 }
 
 type speaker int
@@ -153,6 +174,7 @@ type Model struct {
 	keys    keymap
 
 	notify func(Intent)
+	send   func(clientMsgID, text string)
 
 	width  int
 	height int
@@ -277,8 +299,9 @@ func (m *Model) View() tea.View {
 }
 
 // appendSelf optimistically appends the current input as the user's own line,
-// keyed by a fresh client_msg_id, then clears the input. Nothing goes on the
-// wire (Story 2.4 owns the relay).
+// keyed by a fresh client_msg_id, clears the input, then hands the same id and
+// text to the WithSend callback (if any) so run.loop can put one chat_msg on the
+// wire. A whitespace-only Enter appends nothing and sends nothing.
 func (m *Model) appendSelf() {
 	text := strings.TrimSpace(m.input.Value())
 	if text == "" {
@@ -286,13 +309,17 @@ func (m *Model) appendSelf() {
 		m.input.Reset()
 		return
 	}
+	id := newClientMsgID()
 	m.history = append(m.history, entry{
-		id:   newClientMsgID(),
+		id:   id,
 		from: fromSelf,
 		text: text,
 	})
 	m.input.Reset()
 	m.syncHistory(true)
+	if m.send != nil {
+		m.send(id, text)
+	}
 }
 
 // relayout re-flows every region to the current pane size, keeping the history

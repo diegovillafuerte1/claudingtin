@@ -2,8 +2,10 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -444,7 +446,8 @@ func TestPostHelloFramesDiscardedNotRegisteredTwice(t *testing.T) {
 	writeMsg(t, c, helloFor("acct-chatty", proto.PROTOCOL_VERSION))
 	waitCount(t, h.hub, 1)
 
-	// A second hello, a non-actionable proto frame, raw garbage text, and a
+	// A second hello, a chat_msg from an unpaired conn (the hub relays it only
+	// to a paired peer, so here it no-ops), a heartbeat, raw garbage text, and a
 	// binary frame are all read and dropped — no state change, no reply.
 	// (ready / busy do have meaning now and are covered by the match tests.)
 	writeMsg(t, c, helloFor("acct-chatty", proto.PROTOCOL_VERSION))
@@ -618,6 +621,165 @@ func TestBusyFrameFromQueuedDialIsSilent(t *testing.T) {
 	expectOpenIdle(t, a)
 }
 
+// --- chat relay over the wire ----------------------------------------------
+
+// matchedPair dials two clients, readies both, drains their matched frames, and
+// returns the two conns.
+func matchedPair(t *testing.T, h *harness, keyA, keyB string) (*websocket.Conn, *websocket.Conn) {
+	t.Helper()
+	a := h.dial(t)
+	writeMsg(t, a, helloFor(keyA, proto.PROTOCOL_VERSION))
+	b := h.dial(t)
+	writeMsg(t, b, helloFor(keyB, proto.PROTOCOL_VERSION))
+	waitCount(t, h.hub, 2)
+	writeMsg(t, a, proto.Ready{})
+	writeMsg(t, b, proto.Ready{})
+	readMatched(t, a)
+	readMatched(t, b)
+	return a, b
+}
+
+// expectNoFrame fails if any frame arrives within d; a plain read timeout on our
+// own context is the pass.
+func expectNoFrame(t *testing.T, c *websocket.Conn, d time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	_, data, err := c.Read(ctx)
+	if err == nil {
+		t.Fatalf("expected no frame, got %q", string(data))
+	}
+	if ctx.Err() == nil {
+		t.Fatalf("expected an idle read timeout, got a live error: %v", err)
+	}
+}
+
+func TestChatMsgRelayedToPeerNeverEchoedToSender(t *testing.T) {
+	h := newHarness(t)
+	a, b := matchedPair(t, h, "acct-a", "acct-b")
+
+	writeMsg(t, a, proto.ChatMsg{ClientMsgID: "c1", Text: "hey"})
+
+	got, ok := readMsg(t, b).(proto.ChatMsg)
+	if !ok {
+		t.Fatalf("B: expected a chat_msg, got %#v", got)
+	}
+	if got.ClientMsgID != "c1" || got.Text != "hey" {
+		t.Fatalf("B received %#v, want {c1, hey}", got)
+	}
+
+	// The sender gets nothing back.
+	expectNoFrame(t, a, 300*time.Millisecond)
+}
+
+func TestChatMsgNotEchoedOverFiveSends(t *testing.T) {
+	h := newHarness(t)
+	a, b := matchedPair(t, h, "acct-a", "acct-b")
+
+	for i := 0; i < 5; i++ {
+		writeMsg(t, a, proto.ChatMsg{ClientMsgID: "c", Text: "line"})
+	}
+	for i := 0; i < 5; i++ {
+		if _, ok := readMsg(t, b).(proto.ChatMsg); !ok {
+			t.Fatalf("B: expected chat_msg %d of 5", i+1)
+		}
+	}
+	expectNoFrame(t, a, 300*time.Millisecond)
+}
+
+// TestChatMsgRelayPreservesOrderAndContent: A sends 10 distinct chat lines; B
+// receives exactly those 10, in order, byte-identical — the "in-order
+// single-hop best-effort" promise, which the identical-payload tests cannot see.
+func TestChatMsgRelayPreservesOrderAndContent(t *testing.T) {
+	h := newHarness(t)
+	a, b := matchedPair(t, h, "acct-a", "acct-b")
+
+	const n = 10
+	for i := 0; i < n; i++ {
+		writeMsg(t, a, proto.ChatMsg{ClientMsgID: fmt.Sprintf("m%d", i), Text: fmt.Sprintf("line %d", i)})
+	}
+	for i := 0; i < n; i++ {
+		got, ok := readMsg(t, b).(proto.ChatMsg)
+		if !ok {
+			t.Fatalf("B: frame %d is not a chat_msg: %#v", i, got)
+		}
+		wantID, wantText := fmt.Sprintf("m%d", i), fmt.Sprintf("line %d", i)
+		if got.ClientMsgID != wantID || got.Text != wantText {
+			t.Fatalf("B: frame %d = {%q, %q}, want {%q, %q}", i, got.ClientMsgID, got.Text, wantID, wantText)
+		}
+	}
+	expectNoFrame(t, a, 300*time.Millisecond)
+}
+
+func TestChatMsgMultiByteTextArrivesIntact(t *testing.T) {
+	h := newHarness(t)
+	a, b := matchedPair(t, h, "acct-a", "acct-b")
+
+	const text = "héllo 😀 مرحبا"
+	writeMsg(t, a, proto.ChatMsg{ClientMsgID: "c1", Text: text})
+	got := readMsg(t, b).(proto.ChatMsg)
+	if got.Text != text {
+		t.Fatalf("peer received %q, want %q", got.Text, text)
+	}
+}
+
+func TestChatMsgAfterPeerLeftIsDroppedWithNoError(t *testing.T) {
+	h := newHarness(t)
+	a, b := matchedPair(t, h, "acct-a", "acct-b")
+
+	_ = b.CloseNow() // B drops; A gets session_ended
+	if _, ok := readMsg(t, a).(proto.SessionEnded); !ok {
+		t.Fatal("A: expected session_ended after B dropped")
+	}
+	waitCount(t, h.hub, 1)
+
+	// A sends into the ended pairing: nothing is delivered, no error frame.
+	writeMsg(t, a, proto.ChatMsg{ClientMsgID: "c1", Text: "still there?"})
+	expectNoFrame(t, a, 300*time.Millisecond)
+}
+
+func TestUnpairedChatMsgIsIgnored(t *testing.T) {
+	h := newHarness(t)
+	a := h.dial(t)
+	writeMsg(t, a, helloFor("acct-a", proto.PROTOCOL_VERSION))
+	waitCount(t, h.hub, 1)
+
+	writeMsg(t, a, proto.ChatMsg{ClientMsgID: "c1", Text: "nobody home"})
+
+	// Count stays 1 whether or not the relay has been processed yet (an unpaired
+	// chat_msg is a no-op either way), so this needs no happens-before. It must
+	// come before expectNoFrame, though: that call's read-timeout makes
+	// coder/websocket close the client conn, which asynchronously drops the count.
+	if got := h.hub.Count(); got != 1 {
+		t.Fatalf("hub.Count = %d, want 1 (an unpaired chat_msg changes nothing)", got)
+	}
+	expectNoFrame(t, a, 300*time.Millisecond)
+}
+
+// TestRelayRoundTripP90UnderCeiling is a coarse latency check: ~50 relayed
+// messages A→B, each timed send-to-receive, p90 well under a loose ceiling. A
+// single in-process hop with non-blocking sends and no disk/CPU work.
+func TestRelayRoundTripP90UnderCeiling(t *testing.T) {
+	h := newHarness(t)
+	a, b := matchedPair(t, h, "acct-a", "acct-b")
+
+	const n = 50
+	lat := make([]time.Duration, 0, n)
+	for i := 0; i < n; i++ {
+		start := time.Now()
+		writeMsg(t, a, proto.ChatMsg{ClientMsgID: "c", Text: "ping"})
+		if _, ok := readMsg(t, b).(proto.ChatMsg); !ok {
+			t.Fatalf("B: expected chat_msg %d", i)
+		}
+		lat = append(lat, time.Since(start))
+	}
+	slices.SortFunc(lat, func(x, y time.Duration) int { return cmp.Compare(x, y) })
+	p90 := lat[int(float64(n)*0.9)-1]
+	if p90 > 500*time.Millisecond {
+		t.Fatalf("relay p90 = %v, want well under 500ms", p90)
+	}
+}
+
 // --- /status -----------------------------------------------------------------
 
 func TestStatus_EmptyRegistry(t *testing.T) {
@@ -758,6 +920,12 @@ func TestLogsCarryNoAccountKeyOrFrameText(t *testing.T) {
 	writeMsg(t, connD, proto.Ready{})
 	readMatched(t, connC)
 	readMatched(t, connD)
+	// A real relayed chat line between the matched pair: its text must never
+	// reach the logs either.
+	writeMsg(t, connC, proto.ChatMsg{ClientMsgID: "relayed-1", Text: secretText})
+	if _, ok := readMsg(t, connD).(proto.ChatMsg); !ok {
+		t.Fatal("connD: expected the relayed chat_msg")
+	}
 	writeMsg(t, connC, proto.Busy{})
 	if _, ok := readMsg(t, connD).(proto.SessionEnded); !ok {
 		t.Fatal("connD: expected session_ended after connC went busy")

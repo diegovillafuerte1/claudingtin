@@ -173,7 +173,7 @@ func (s *server) serveConn(conn *websocket.Conn, remote string) {
 		Key:      hello.AccountKey,
 		Conn:     conn,
 		Evict:    make(chan struct{}),
-		Outbound: make(chan any, 4),
+		Outbound: make(chan any, 32),
 	}
 	s.hub.Register(sess)
 	s.logger.Info("ws connected", "remote", remote, "pv", pv)
@@ -185,8 +185,8 @@ func (s *server) serveConn(conn *websocket.Conn, remote string) {
 
 	// The read loop lives on its own goroutine so the handler's select can also
 	// wait on eviction and on hub-delivered outbound frames. Post-hello frames
-	// are decoded; only ready / busy do anything — every other frame, and any
-	// decode error, is ignored (the v1 discard behaviour).
+	// are decoded; only ready / busy / chat_msg do anything — every other frame,
+	// and any decode error, is ignored (the v1 discard behaviour).
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
@@ -199,11 +199,16 @@ func (s *server) serveConn(conn *websocket.Conn, remote string) {
 			if err != nil {
 				continue
 			}
-			switch msg.(type) {
+			switch m := msg.(type) {
 			case proto.Ready:
 				s.hub.Ready(sess)
 			case proto.Busy:
 				s.hub.Busy(sess)
+			case proto.ChatMsg:
+				// Relay to the paired peer only. The hub drops it if this
+				// session is not paired. No log line in either direction — even
+				// a content-free one would leak chat volume and timing.
+				s.hub.Relay(sess, m)
 			}
 		}
 	}()

@@ -588,6 +588,103 @@ func TestUnregisterWhilePairedNotifiesSurvivor(t *testing.T) {
 	_ = b
 }
 
+// --- chat relay ----------------------------------------------------------
+
+// TestRelayDeliversToPeerOnlyNeverSender: A and B paired, Relay(A, msg) lands
+// the identical ChatMsg on B's Outbound and nothing on A's.
+func TestRelayDeliversToPeerOnlyNeverSender(t *testing.T) {
+	h, stop := startHub(t)
+	defer stop()
+
+	a, b := newSession("a"), newSession("b")
+	h.Register(a)
+	h.Register(b)
+	h.Ready(a)
+	h.Ready(b)
+	_ = matchedFrame(t, a)
+	_ = matchedFrame(t, b)
+
+	msg := proto.ChatMsg{ClientMsgID: "c1", Text: "hey"}
+	h.Relay(a, msg)
+
+	got, ok := recvOutbound(t, b).(proto.ChatMsg)
+	if !ok {
+		t.Fatalf("B: expected a proto.ChatMsg, got %#v", got)
+	}
+	if got != msg {
+		t.Fatalf("B received %#v, want %#v", got, msg)
+	}
+	expectNoOutbound(t, a) // the sender is never echoed its own line
+	expectNoOutbound(t, b)
+
+	// The reverse direction works too, and still never echoes.
+	msg2 := proto.ChatMsg{ClientMsgID: "c2", Text: "hi back"}
+	h.Relay(b, msg2)
+	if got := recvOutbound(t, a).(proto.ChatMsg); got != msg2 {
+		t.Fatalf("A received %#v, want %#v", got, msg2)
+	}
+	expectNoOutbound(t, b)
+}
+
+// TestRelayFromUnpairedSessionIsSilentNoOp: a Relay from a session that was
+// never matched delivers nothing and does not panic.
+func TestRelayFromUnpairedSessionIsSilentNoOp(t *testing.T) {
+	h, stop := startHub(t)
+	defer stop()
+
+	a := newSession("a")
+	h.Register(a)
+	h.Ready(a)
+	if _, ok := recvOutbound(t, a).(proto.Queued); !ok {
+		t.Fatal("A: expected queued")
+	}
+
+	h.Relay(a, proto.ChatMsg{ClientMsgID: "c1", Text: "into the void"})
+	expectNoOutbound(t, a)
+
+	// An entirely unknown session is fine too.
+	h.Relay(newSession("ghost"), proto.ChatMsg{ClientMsgID: "c2", Text: "nobody"})
+
+	// Clear A out of the queue so the next pair forms cleanly.
+	h.Busy(a)
+	expectNoOutbound(t, a)
+
+	// The hub is still healthy: a clean pair still matches.
+	b, c := newSession("b"), newSession("c")
+	h.Register(b)
+	h.Register(c)
+	h.Ready(b)
+	h.Ready(c)
+	if mb, mc := matchedFrame(t, b), matchedFrame(t, c); mb.SessionID == "" || mb.SessionID != mc.SessionID {
+		t.Fatalf("post-noop match broken: %q vs %q", mb.SessionID, mc.SessionID)
+	}
+}
+
+// TestRelayAfterTeardownDrops: once the pairing has ended, a chat line from the
+// survivor finds no pairing entry and is dropped — no delivery, no error.
+func TestRelayAfterTeardownDrops(t *testing.T) {
+	h, stop := startHub(t)
+	defer stop()
+
+	a, b := newSession("a"), newSession("b")
+	h.Register(a)
+	h.Register(b)
+	h.Ready(a)
+	h.Ready(b)
+	_ = matchedFrame(t, a)
+	_ = matchedFrame(t, b)
+
+	// B disconnects; A gets the bare session_ended and the pairing is gone.
+	h.Unregister(b)
+	if _, ok := recvOutbound(t, a).(proto.SessionEnded); !ok {
+		t.Fatal("A: expected session_ended after B disconnected")
+	}
+
+	h.Relay(a, proto.ChatMsg{ClientMsgID: "c1", Text: "still there?"})
+	expectNoOutbound(t, a)
+	expectNoOutbound(t, b)
+}
+
 func TestReadyTwiceQueuesOnceNoExtraFrame(t *testing.T) {
 	h, stop := startHub(t)
 	defer stop()
@@ -617,6 +714,7 @@ func TestConcurrentReadyBusyRaceClean(t *testing.T) {
 				h.Register(s)
 				h.Ready(s)
 				_ = h.Count()
+				h.Relay(s, proto.ChatMsg{ClientMsgID: "x", Text: "race"})
 				if j%2 == 0 {
 					h.Busy(s)
 				}

@@ -390,6 +390,71 @@ func TestMatchedSurfacedToCaller(t *testing.T) {
 	}
 }
 
+// TestChatMsgSurfacedToCaller: the server sends a proto.ChatMsg; the client
+// delivers it on ChatMsgs() with fields intact and keeps serving afterwards (a
+// following non-terminal frame is still ignored, Run does not return). wsclient
+// has no logger by construction, so "nothing is logged" holds structurally.
+func TestChatMsgSurfacedToCaller(t *testing.T) {
+	shrinkBackoff(t)
+
+	want := proto.ChatMsg{ClientMsgID: "cmid-7", Text: "héllo 😀 مرحبا"}
+	s := newWSServerWith(t, func(idx int, conn *websocket.Conn) {
+		mb, _ := proto.Encode(want)
+		_ = conn.Write(context.Background(), websocket.MessageText, mb)
+		qb, _ := proto.Encode(proto.Queued{})
+		_ = conn.Write(context.Background(), websocket.MessageText, qb)
+	})
+	c := New(Config{URL: s.url(), AccountKey: "k"})
+	drainEvents(t, c)
+	_, res := runClient(t, c)
+
+	select {
+	case got := <-c.ChatMsgs():
+		if got != want {
+			t.Fatalf("ChatMsgs() delivered %+v, want %+v", got, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no value on ChatMsgs() after the server sent one")
+	}
+
+	select {
+	case r := <-res:
+		t.Fatalf("Run returned %v after a chat_msg + queued; it must keep serving", r)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestSendChatWithoutConnection(t *testing.T) {
+	c := New(Config{URL: "ws://127.0.0.1:0/ws", AccountKey: "k"})
+	if err := c.SendChat(context.Background(), proto.ChatMsg{ClientMsgID: "c1", Text: "hi"}); err != ErrNotConnected {
+		t.Fatalf("SendChat with no connection = %v, want ErrNotConnected", err)
+	}
+}
+
+// TestSendChatFrameArrives: with a live connection SendChat puts the chat_msg on
+// the wire after the hello.
+func TestSendChatFrameArrives(t *testing.T) {
+	shrinkBackoff(t)
+	s := newWSServer(t)
+	c := New(Config{URL: s.url(), AccountKey: "k"})
+	runClient(t, c)
+
+	<-c.Events() // Connected
+
+	want := proto.ChatMsg{ClientMsgID: "c1", Text: "on the wire"}
+	if err := c.SendChat(context.Background(), want); err != nil {
+		t.Fatalf("SendChat: %v", err)
+	}
+	waitFor(t, "the chat_msg frame", func() bool {
+		f := s.framesFor(0)
+		if len(f) < 2 {
+			return false
+		}
+		got, ok := f[1].(proto.ChatMsg)
+		return ok && got == want
+	})
+}
+
 func TestContextCancelStopsRun(t *testing.T) {
 	shrinkBackoff(t)
 	s := newWSServer(t)
