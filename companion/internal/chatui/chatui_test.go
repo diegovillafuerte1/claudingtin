@@ -240,6 +240,69 @@ func TestEnterAppendsOwnLineClearsInputSendsNothing(t *testing.T) {
 	}
 }
 
+// --- send: WithSend relay callback (Story 2.4) -----------------------------
+
+func TestEnterFiresWithSendOnceWithFreshIDAndTrimmedText(t *testing.T) {
+	type call struct{ id, text string }
+	var calls []call
+	m := New(proto.Matched{Opener: "hi there"},
+		WithSend(func(id, text string) { calls = append(calls, call{id, text}) }))
+
+	m = typeString(t, m, "  hey there  ")
+	m, _ = pressEnter(t, m)
+
+	if len(calls) != 1 {
+		t.Fatalf("WithSend fired %d times, want exactly 1", len(calls))
+	}
+	if calls[0].text != "hey there" {
+		t.Fatalf("WithSend text = %q, want the trimmed %q", calls[0].text, "hey there")
+	}
+	last := m.history[len(m.history)-1]
+	if last.from != fromSelf || last.text != "hey there" {
+		t.Fatalf("optimistic self entry = %+v, want the trimmed own line", last)
+	}
+	if calls[0].id == "" || calls[0].id != last.id {
+		t.Fatalf("WithSend id = %q, want the fresh id keyed on the self entry (%q)", calls[0].id, last.id)
+	}
+
+	// A second send fires it again with a different id.
+	m = typeString(t, m, "again")
+	m, _ = pressEnter(t, m)
+	if len(calls) != 2 {
+		t.Fatalf("second send fired WithSend %d times total, want 2", len(calls))
+	}
+	if calls[1].id == calls[0].id || calls[1].text != "again" {
+		t.Fatalf("second call = %+v, want a fresh id and %q", calls[1], "again")
+	}
+}
+
+func TestWhitespaceOnlyEnterDoesNotFireWithSend(t *testing.T) {
+	fired := 0
+	m := New(proto.Matched{Opener: "hi there"},
+		WithSend(func(id, text string) { fired++ }))
+
+	m = typeString(t, m, "   ")
+	m, _ = pressEnter(t, m)
+	m, _ = pressEnter(t, m) // bare Enter, empty box
+
+	if fired != 0 {
+		t.Fatalf("WithSend fired %d times on whitespace-only / empty Enter, want 0", fired)
+	}
+}
+
+func TestPeerMsgStillAppendsThemEntryWithSendWired(t *testing.T) {
+	m := New(proto.Matched{Opener: "hi there"}, WithSend(func(string, string) {}))
+	m, _ = step(t, m, PeerMsg{ClientMsgID: "peer-9", Text: "hello from them"})
+
+	last := m.history[len(m.history)-1]
+	if last.from != fromPeer || last.text != "hello from them" || last.id != "peer-9" {
+		t.Fatalf("last history entry = %+v, want the peer line keyed by peer-9", last)
+	}
+	if !strings.Contains(viewOf(m), "hello from them") {
+		t.Fatalf("peer line not shown in the view:\n%s", viewOf(m))
+	}
+}
+
 func TestEmptyEnterIsANoop(t *testing.T) {
 	m := New(proto.Matched{Opener: "hi there"})
 	before := len(m.history)

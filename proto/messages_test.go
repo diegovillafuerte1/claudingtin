@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // roundTripSamples holds one populated (or deliberately empty) value for every
@@ -16,7 +17,7 @@ var roundTripSamples = []any{
 	Hello{AccountKey: "acct-1a2b3c", ProtocolVersion: 1},
 	Ready{},
 	Busy{},
-	ChatMsg{ClientMsgID: "cmid-42", Text: "hey there"},
+	ChatMsg{ClientMsgID: "cmid-42", Text: "héllo 😀 مرحبا"},
 	Leave{},
 	Block{},
 	Report{LastN: 5},
@@ -255,6 +256,39 @@ func TestDecodeUnknownErrorNamesTheType(t *testing.T) {
 	}
 	if !regexp.MustCompile(`bogus`).MatchString(err.Error()) {
 		t.Errorf("error %q does not name the unknown type", err)
+	}
+}
+
+// TestChatMsgInvalidUTF8NormalizesToReplacementChar locks the wire contract for
+// ChatMsg.Text: proto.Encode/Decode go through encoding/json, which replaces an
+// invalid UTF-8 byte with U+FFFD on both marshal and unmarshal. A relayed chat
+// line therefore reaches the peer as valid UTF-8 with the bad bytes swapped for
+// the replacement char — never rejected, never a bytes-preserving passthrough.
+// (Closes the spec-1-1 deferred item.)
+func TestChatMsgInvalidUTF8NormalizesToReplacementChar(t *testing.T) {
+	raw, err := Encode(ChatMsg{ClientMsgID: "u1", Text: "ab\x80cd"})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	got, err := Decode(raw)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	msg, ok := got.(ChatMsg)
+	if !ok {
+		t.Fatalf("Decode returned %T, want ChatMsg", got)
+	}
+	if !utf8.ValidString(msg.Text) {
+		t.Fatalf("decoded text is not valid UTF-8: %q", msg.Text)
+	}
+	if strings.ContainsRune(msg.Text, 0x80) {
+		t.Fatalf("decoded text still carries the invalid 0x80 byte: %q", msg.Text)
+	}
+	if !strings.ContainsRune(msg.Text, '�') {
+		t.Fatalf("decoded text has no U+FFFD replacement char: %q", msg.Text)
+	}
+	if msg.ClientMsgID != "u1" {
+		t.Fatalf("client_msg_id = %q, want %q", msg.ClientMsgID, "u1")
 	}
 }
 

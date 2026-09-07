@@ -1,11 +1,12 @@
 // Package wsclient owns the companion's single websocket to the backend: it
 // dials, sends the version + account-key hello as the first frame after every
-// (re)connect, carries ready/busy state frames out, watches for the three
-// inbound frames that matter (matched, please_update, session_ended) — matched
-// is surfaced on Matched() for run.loop to open the chat surface, the other two
-// end Run — and reconnects with an exponentially backed-off, fully jittered
-// delay after any drop — forever, until the context is cancelled or the server
-// asks the client to update.
+// (re)connect, carries ready/busy state frames and outbound chat_msg frames
+// out, watches for the four inbound frames that matter (matched, chat_msg,
+// please_update, session_ended) — matched is surfaced on Matched() for run.loop
+// to open the chat surface, chat_msg on ChatMsgs() for run.loop to render as a
+// peer line, and the other two end Run — and reconnects with an exponentially
+// backed-off, fully jittered delay after any drop — forever, until the context
+// is cancelled or the server asks the client to update.
 //
 // It speaks nothing on the wire that is not a proto message, mirrors the
 // backend's framing (text frames, proto.Encode/Decode, a normal close on a
@@ -85,6 +86,7 @@ type Client struct {
 
 	events  chan Event
 	matched chan proto.Matched
+	chatMsg chan proto.ChatMsg
 
 	mu   sync.Mutex
 	conn *websocket.Conn
@@ -99,6 +101,7 @@ func New(cfg Config) *Client {
 		accountKey: cfg.AccountKey,
 		events:     make(chan Event, 8),
 		matched:    make(chan proto.Matched, 1),
+		chatMsg:    make(chan proto.ChatMsg, 64),
 	}
 }
 
@@ -119,6 +122,15 @@ func (c *Client) Events() <-chan Event { return c.events }
 // is already up), so a session_ended or please_update queued behind it is
 // still processed without delay.
 func (c *Client) Matched() <-chan proto.Matched { return c.matched }
+
+// ChatMsgs delivers each inbound peer proto.ChatMsg (fields intact) to the
+// caller. It is buffered (64) and never closed; run.loop drains it and forwards
+// each line to the live chat surface, dropping it if no chat is active. Like
+// Matched it is not terminal — Run keeps serving after one — and the reader
+// never blocks on it: the serve goroutine's send is non-blocking, so a chat
+// line that arrives while the buffer is full is dropped. v1 has no ack, so
+// drop-on-full is acceptable.
+func (c *Client) ChatMsgs() <-chan proto.ChatMsg { return c.chatMsg }
 
 func (c *Client) emit(ctx context.Context, k EventKind) {
 	select {
@@ -209,6 +221,21 @@ func (c *Client) SendState(ctx context.Context, msg any) error {
 	return c.writeFrame(ctx, conn, msg)
 }
 
+// SendChat writes m as one text frame on the live connection. With no live
+// connection it returns ErrNotConnected; v1 does not queue or retry the line
+// (the optimistic local echo already showed it), so the caller just logs a
+// content-free failure. The backend relays it to the paired peer only and never
+// echoes it back.
+func (c *Client) SendChat(ctx context.Context, m proto.ChatMsg) error {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return ErrNotConnected
+	}
+	return c.writeFrame(ctx, conn, m)
+}
+
 func (c *Client) dial(ctx context.Context) (*websocket.Conn, error) {
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
@@ -262,6 +289,15 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn) serveResult {
 				// behind it would wait.
 				select {
 				case c.matched <- m:
+				default:
+				}
+			case proto.ChatMsg:
+				// Not terminal: hand the peer line to run.loop and keep
+				// serving. Non-blocking for the same reason as matched — a
+				// terminal frame queued behind it must not wait, and v1 has no
+				// ack so drop-on-full is acceptable.
+				select {
+				case c.chatMsg <- m:
 				default:
 				}
 			case proto.PleaseUpdate:
