@@ -1,0 +1,28 @@
+# Curated conversation openers, one per line.
+# Voice guide and how to contribute: backend/openers.md
+# Blank lines and lines beginning with # are ignored.
+# Every entry is trimmed and must be 8-120 plain-text characters.
+what's the last thing that made you laugh?
+what tab have you had open for way too long?
+what's a small thing that went right today?
+what are you quietly putting off right now?
+what's the best snack in your kitchen right now?
+what song is stuck in your head today?
+what's something you changed your mind about lately?
+describe the view from your nearest window
+what's a tiny skill you're weirdly proud of?
+what did you actually have for breakfast?
+what's the last photo you took on your phone?
+what's a word you just like saying out loud?
+what would you do with a surprise free hour?
+what's the oldest thing on your desk right now?
+what's a movie you will rewatch forever?
+what's the weather doing where you are?
+what are you looking forward to this week?
+what's your comfort meal when nothing else works?
+what's a hobby you keep meaning to start?
+what's the last thing you bought that you love?
+tea or coffee, and how do you take it?
+what's a place you'd return to in a heartbeat?
+what's made you smile in the last day or so?
+what's the last show that genuinely surprised you?

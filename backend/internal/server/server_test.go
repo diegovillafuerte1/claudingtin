@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/diegovillafuerte1/claudingtin/backend"
 	"github.com/diegovillafuerte1/claudingtin/backend/internal/hub"
 	"github.com/diegovillafuerte1/claudingtin/proto"
 )
@@ -480,8 +482,17 @@ func TestTwoReadyDialsMatchWithEqualSessionID(t *testing.T) {
 	if ma.SessionID != mb.SessionID {
 		t.Fatalf("session_id differs: %q vs %q", ma.SessionID, mb.SessionID)
 	}
-	if ma.Pseudonym != "" || ma.Blurb != "" || ma.Opener != "" {
-		t.Fatalf("pseudonym/blurb/opener must be empty in Story 2.1: %#v", ma)
+	if ma.Pseudonym != "" || ma.Blurb != "" {
+		t.Fatalf("pseudonym/blurb must be empty in Epic 2: %#v", ma)
+	}
+	if ma.Opener == "" {
+		t.Fatal("matched opener is empty")
+	}
+	if ma.Opener != mb.Opener {
+		t.Fatalf("opener differs between peers over the wire: %q vs %q", ma.Opener, mb.Opener)
+	}
+	if !slices.Contains(backend.Openers(), ma.Opener) {
+		t.Fatalf("opener %q is not in the curated set", ma.Opener)
 	}
 }
 

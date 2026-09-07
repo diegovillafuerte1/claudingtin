@@ -115,8 +115,10 @@ const TypeMatched = "matched"
 // Matched announces a counterpart has been found. SessionID is the backend-minted
 // opaque, unguessable identifier for the pairing — one per match, byte-identical
 // for both peers. Pseudonym and Blurb come from the backend's canonical profile
-// (empty until Epic 5). Opener is the pre-written conversation opener (empty
-// until Story 2.2 adds selection).
+// (empty until Epic 5). Opener is the pre-written conversation opener the backend
+// selects per match from its curated set, rotating through the set so the same
+// opener is never used for two consecutive matches; both peers get the identical
+// string.
 type Matched struct {
 	SessionID string `json:"session_id"`
 	Pseudonym string `json:"pseudonym"`

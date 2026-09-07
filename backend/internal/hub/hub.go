@@ -1,7 +1,8 @@
 // Package hub is the single-writer core: exactly one goroutine owns the
-// key -> session map, the strict-FIFO wait queue, the active pairings, and the
-// session_id mint, and every other goroutine touches that state only by sending
-// a command on a channel (architecture decision AD-8). The hub goroutine never
+// key -> session map, the strict-FIFO wait queue, the active pairings, the
+// session_id mint, and the opener rotation cursor, and every other goroutine
+// touches that state only by sending a command on a channel (architecture
+// decision AD-8). The hub goroutine never
 // performs network I/O and writes no logs — a takeover only closes the displaced
 // session's evict channel, and a match or teardown only does a non-blocking send
 // of a ready-to-write proto frame onto each Session.Outbound channel that the
@@ -14,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/diegovillafuerte1/claudingtin/backend"
 	"github.com/diegovillafuerte1/claudingtin/proto"
 )
 
@@ -69,8 +71,9 @@ func New() *Hub {
 	}
 }
 
-// Run owns the registry map, the FIFO wait queue, the active pairings, and the
-// session_id mint, and consumes the command channel until ctx is cancelled. It
+// Run owns the registry map, the FIFO wait queue, the active pairings, the
+// session_id mint, and the opener rotation cursor, and consumes the command
+// channel until ctx is cancelled. It
 // performs no network I/O and writes no logs: on a match or teardown it does a
 // non-blocking send of a ready-to-write proto value onto each Session.Outbound,
 // and the connection handler — the sole writer for that socket — drains it. Run
@@ -79,7 +82,10 @@ func (h *Hub) Run(ctx context.Context) {
 	defer close(h.stopped)
 
 	sessions := make(map[string]*Session)
-	p := &pairingState{pairings: make(map[*Session]*Session)}
+	p := &pairingState{
+		pairings: make(map[*Session]*Session),
+		openers:  backend.Openers(),
+	}
 
 	// The one eligibility seam. Story 2.1: any non-self successor is eligible.
 	// Epic 4 ANDs block / cooldown / ban predicates into this closure without
@@ -155,12 +161,14 @@ func (h *Hub) Run(ctx context.Context) {
 	}
 }
 
-// pairingState is the hub goroutine's private FIFO queue and pairing table. It
-// is created inside Run and never escapes that goroutine, so every method here
-// runs single-writer.
+// pairingState is the hub goroutine's private FIFO queue, pairing table, and
+// opener rotation cursor. It is created inside Run and never escapes that
+// goroutine, so every method here runs single-writer.
 type pairingState struct {
-	queue    []*Session
-	pairings map[*Session]*Session
+	queue        []*Session
+	pairings     map[*Session]*Session
+	openers      []string
+	openerCursor int
 }
 
 // enqueue appends s to the tail of the wait queue unless it is already queued or
@@ -232,12 +240,26 @@ func (p *pairingState) drainQueue(eligible func(a, b *Session) bool) {
 		}
 		p.queue = next
 
-		m := proto.Matched{SessionID: newSessionID()}
+		m := proto.Matched{SessionID: newSessionID(), Opener: p.nextOpener()}
 		deliver(head, m)
 		deliver(succ, m)
 		p.pairings[head] = succ
 		p.pairings[succ] = head
 	}
+}
+
+// nextOpener returns the opener at the rotation cursor and advances the cursor
+// by one, wrapping at the end. With two or more openers loaded this guarantees
+// the same opener is never used for two consecutive matches. The empty-set guard
+// is defensive: Run always populates p.openers from backend.Openers(), which
+// panics rather than returning fewer than two entries.
+func (p *pairingState) nextOpener() string {
+	if len(p.openers) == 0 {
+		return ""
+	}
+	o := p.openers[p.openerCursor]
+	p.openerCursor = (p.openerCursor + 1) % len(p.openers)
+	return o
 }
 
 // firstEligibleSuccessor scans from just past the queue head, up to maxScan

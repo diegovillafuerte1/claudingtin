@@ -31,13 +31,18 @@ exposes exactly two HTTP routes:
   `ready` enqueues the account key, `busy` removes it. A waiting key that is not
   paired at once gets a `queued` frame; when the queue head pairs with the first
   eligible successor both peers get a `matched` frame carrying a backend-minted
-  opaque `session_id` (`pseudonym` / `blurb` / `opener` are empty until later
-  stories). Leaving the queue unmatched — via `busy`, a disconnect, or a
-  takeover — is silent. Tearing down an active pairing (a peer's `busy` or
+  opaque `session_id` and a byte-identical `opener` — a pre-written conversation
+  opener the hub rotates through a curated set with a round-robin cursor, so the
+  same opener is never used for two consecutive matches (`pseudonym` / `blurb`
+  stay empty until later stories). The set is `backend/openers.txt`
+  (contributor-editable, one opener per line, embedded at build time and
+  format-bound by `backend/openers_test.go`); the voice guide is
+  `backend/openers.md`. Leaving the queue unmatched — via `busy`, a disconnect,
+  or a takeover — is silent. Tearing down an active pairing (a peer's `busy` or
   disconnect) sends the surviving peer a bare `session_ended` with no re-enqueue.
-  All queue, pairing, and `session_id` state is in-memory and dies with the
-  process. Other post-`hello` frames (`chat_msg`, `leave`, undecodable) are still
-  read and discarded in this epic.
+  All queue, pairing, `session_id`, and opener-rotation-cursor state is in-memory
+  and dies with the process. Other post-`hello` frames (`chat_msg`, `leave`,
+  undecodable) are still read and discarded in this epic.
 - **`GET /status`** — returns `200` with `application/json` body
   `{"concurrent_users": N}`, where `N` is the number of distinct connected
   account keys. A non-GET `/status` is `405`; every other path is `404`.
