@@ -349,6 +349,47 @@ func TestSessionEndedEndsClient(t *testing.T) {
 	}
 }
 
+// TestMatchedSurfacedToCaller: the server sends a proto.Matched; the client
+// delivers it on Matched() with every field intact, keeps serving afterwards
+// (a following non-terminal frame is still ignored, Run does not return), and
+// nothing is logged (wsclient has no logger by construction).
+func TestMatchedSurfacedToCaller(t *testing.T) {
+	shrinkBackoff(t)
+
+	want := proto.Matched{
+		SessionID: "sess-abc123",
+		Pseudonym: "kestrel",
+		Blurb:     "collects maps",
+		Opener:    "what's the last thing that made you laugh?",
+	}
+	s := newWSServerWith(t, func(idx int, conn *websocket.Conn) {
+		mb, _ := proto.Encode(want)
+		_ = conn.Write(context.Background(), websocket.MessageText, mb)
+		// A later non-terminal frame that must still be ignored.
+		qb, _ := proto.Encode(proto.Queued{})
+		_ = conn.Write(context.Background(), websocket.MessageText, qb)
+	})
+	c := New(Config{URL: s.url(), AccountKey: "k"})
+	drainEvents(t, c)
+	_, res := runClient(t, c)
+
+	select {
+	case got := <-c.Matched():
+		if got != want {
+			t.Fatalf("Matched() delivered %+v, want %+v", got, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no value on Matched() after the server sent one")
+	}
+
+	// Run keeps going: the Queued frame did not end it.
+	select {
+	case r := <-res:
+		t.Fatalf("Run returned %v after a matched + queued; it must keep serving", r)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
 func TestContextCancelStopsRun(t *testing.T) {
 	shrinkBackoff(t)
 	s := newWSServer(t)

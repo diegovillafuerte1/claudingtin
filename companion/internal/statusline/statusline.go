@@ -1,7 +1,9 @@
-// Package statusline is the companion's entire UI in Epic 1: one human-readable
-// line on an io.Writer that changes as the connection and the model's
-// think-time move between a handful of phases. There is no chat surface yet and
-// nothing here ever writes to a Claude Code stream.
+// Package statusline is the companion's ambient UI: one human-readable line on
+// an io.Writer that changes as the connection and the model's think-time move
+// between a handful of phases. From Story 2.3 a Bubble Tea chat surface
+// (internal/chatui) takes over the pane while a match is live and run suppresses
+// these writes for its duration; this line covers every other moment. Nothing
+// here ever writes to a Claude Code stream.
 //
 // All copy lives in this file so the voice — warm, lowercase-friendly, and
 // never naming the machinery ("waiting", never "queue") — stays in one place.

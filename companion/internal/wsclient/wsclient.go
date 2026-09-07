@@ -1,9 +1,11 @@
 // Package wsclient owns the companion's single websocket to the backend: it
 // dials, sends the version + account-key hello as the first frame after every
-// (re)connect, carries ready/busy state frames out, watches for the two inbound
-// frames that matter (please_update, session_ended), and reconnects with an
-// exponentially backed-off, fully jittered delay after any drop — forever,
-// until the context is cancelled or the server asks the client to update.
+// (re)connect, carries ready/busy state frames out, watches for the three
+// inbound frames that matter (matched, please_update, session_ended) — matched
+// is surfaced on Matched() for run.loop to open the chat surface, the other two
+// end Run — and reconnects with an exponentially backed-off, fully jittered
+// delay after any drop — forever, until the context is cancelled or the server
+// asks the client to update.
 //
 // It speaks nothing on the wire that is not a proto message, mirrors the
 // backend's framing (text frames, proto.Encode/Decode, a normal close on a
@@ -81,7 +83,8 @@ type Client struct {
 	url        string
 	accountKey string
 
-	events chan Event
+	events  chan Event
+	matched chan proto.Matched
 
 	mu   sync.Mutex
 	conn *websocket.Conn
@@ -95,6 +98,7 @@ func New(cfg Config) *Client {
 		url:        cfg.URL,
 		accountKey: cfg.AccountKey,
 		events:     make(chan Event, 8),
+		matched:    make(chan proto.Matched, 1),
 	}
 }
 
@@ -105,6 +109,16 @@ func New(cfg Config) *Client {
 // to its select within one frameWriteTimeout, so this cannot stall the client
 // for long.
 func (c *Client) Events() <-chan Event { return c.events }
+
+// Matched delivers the inbound proto.Matched frame (fields intact) to the
+// caller. It is buffered by one and never closed; run.loop drains it to launch
+// the chat surface. matched is not a terminal frame — Run keeps serving after
+// one, so a session that ends and re-matches within the same Run works. The
+// reader never blocks on it: a second matched that arrives before run.loop
+// drains the first is dropped (run.loop ignores a second matched while a chat
+// is already up), so a session_ended or please_update queued behind it is
+// still processed without delay.
+func (c *Client) Matched() <-chan proto.Matched { return c.matched }
 
 func (c *Client) emit(ctx context.Context, k EventKind) {
 	select {
@@ -218,7 +232,8 @@ const (
 // serve reads frames on a dedicated goroutine (so an outbound write and an
 // inbound session_ended can never deadlock, the same shape as the backend's
 // serveConn) until the context is cancelled, a read fails, or a terminal
-// inbound frame arrives. Every other inbound frame is discarded.
+// inbound frame arrives. A proto.Matched is handed to the caller on c.matched
+// and serving continues; every other inbound frame is discarded.
 func (c *Client) serve(ctx context.Context, conn *websocket.Conn) serveResult {
 	readErr := make(chan struct{}, 1)
 	terminal := make(chan serveResult, 1)
@@ -237,7 +252,18 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn) serveResult {
 			if derr != nil {
 				continue // undecodable frame — discard
 			}
-			switch msg.(type) {
+			switch m := msg.(type) {
+			case proto.Matched:
+				// Not terminal: hand it to run.loop and keep serving. The send
+				// is non-blocking — the channel is buffered by one, and if
+				// run.loop has not drained a prior matched yet, dropping this
+				// one is correct (run.loop ignores a second matched while a chat
+				// is up). The reader must not stall here or a terminal frame
+				// behind it would wait.
+				select {
+				case c.matched <- m:
+				default:
+				}
 			case proto.PleaseUpdate:
 				terminal <- servePleaseUpdate
 				return

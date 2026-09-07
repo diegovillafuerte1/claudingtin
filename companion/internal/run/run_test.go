@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,9 @@ import (
 
 	"github.com/coder/websocket"
 
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/diegovillafuerte1/claudingtin/companion/internal/chatui"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/safety"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/statusline"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/transcript"
@@ -54,7 +58,8 @@ func ackedConfigDir(t *testing.T) string {
 
 // fakeClient stands in for *wsclient.Client in the loop tests.
 type fakeClient struct {
-	events chan wsclient.Event
+	events  chan wsclient.Event
+	matched chan proto.Matched
 
 	mu        sync.Mutex
 	sent      []any
@@ -67,8 +72,9 @@ type fakeClient struct {
 
 func newFakeClient() *fakeClient {
 	return &fakeClient{
-		events: make(chan wsclient.Event, 8),
-		stop:   make(chan struct{}),
+		events:  make(chan wsclient.Event, 8),
+		matched: make(chan proto.Matched, 1),
+		stop:    make(chan struct{}),
 	}
 }
 
@@ -116,6 +122,10 @@ func (f *fakeClient) setSendErr(err error) {
 }
 
 func (f *fakeClient) Events() <-chan wsclient.Event { return f.events }
+
+// Matched is nil-safe: a fakeClient built without a matched channel simply
+// never surfaces a match.
+func (f *fakeClient) Matched() <-chan proto.Matched { return f.matched }
 
 func (f *fakeClient) endRunWith(r wsclient.Result) {
 	f.result = r
@@ -1196,5 +1206,329 @@ func TestRunGateAbortReturnsNil(t *testing.T) {
 	}
 	if frames := frameNames(rec.frames(0)); len(frames) != 0 {
 		t.Fatalf("wire frames observed on an aborted gate: %v", frames)
+	}
+}
+
+// --- chat surface launch / teardown (Story 2.3) ----------------------------
+
+// fakeChatProgram stands in for *tea.Program so the loop's launch/teardown is
+// exercised with no PTY. Run blocks until Quit (or, when ignoreQuit is set, only
+// until Kill). Println captures the content-free intent lines loop routes
+// through the program.
+type fakeChatProgram struct {
+	notify     func(chatui.Intent)
+	quit       chan struct{}
+	kill       chan struct{}
+	ran        chan struct{}
+	ignoreQuit bool
+
+	mu     sync.Mutex
+	killed bool
+	prints []string
+}
+
+func (f *fakeChatProgram) Run() (tea.Model, error) {
+	close(f.ran)
+	if f.ignoreQuit {
+		<-f.kill
+	} else {
+		<-f.quit
+	}
+	return nil, nil
+}
+
+func (f *fakeChatProgram) Println(args ...any) {
+	f.mu.Lock()
+	f.prints = append(f.prints, fmt.Sprint(args...))
+	f.mu.Unlock()
+}
+
+func (f *fakeChatProgram) Quit() {
+	select {
+	case <-f.quit:
+	default:
+		close(f.quit)
+	}
+}
+
+func (f *fakeChatProgram) Kill() {
+	f.mu.Lock()
+	f.killed = true
+	f.mu.Unlock()
+	select {
+	case <-f.kill:
+	default:
+		close(f.kill)
+	}
+	f.Quit()
+}
+
+func (f *fakeChatProgram) wasKilled() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.killed
+}
+
+func (f *fakeChatProgram) printed() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return strings.Join(f.prints, "\n")
+}
+
+// stubChatProgram swaps newChatProgram for a fake and hands back a channel that
+// yields each constructed fake. It also shrinks the Kill grace so a test that
+// wants the Kill path does not wait seconds. Any opts are applied to every fake
+// it constructs (e.g. to set ignoreQuit).
+func stubChatProgram(t *testing.T, opts ...func(*fakeChatProgram)) <-chan *fakeChatProgram {
+	t.Helper()
+	oldNew, oldGrace := newChatProgram, chatQuitGrace
+	chatQuitGrace = 100 * time.Millisecond
+	made := make(chan *fakeChatProgram, 4)
+	newChatProgram = func(_ context.Context, _ Config, _ proto.Matched, notify func(chatui.Intent)) chatProgram {
+		f := &fakeChatProgram{
+			notify: notify,
+			quit:   make(chan struct{}),
+			kill:   make(chan struct{}),
+			ran:    make(chan struct{}),
+		}
+		for _, o := range opts {
+			o(f)
+		}
+		made <- f
+		return f
+	}
+	t.Cleanup(func() { newChatProgram, chatQuitGrace = oldNew, oldGrace })
+	return made
+}
+
+func waitChat(t *testing.T, made <-chan *fakeChatProgram) *fakeChatProgram {
+	t.Helper()
+	select {
+	case f := <-made:
+		select {
+		case <-f.ran:
+		case <-time.After(2 * time.Second):
+			t.Fatal("chat program was constructed but never Run")
+		}
+		return f
+	case <-time.After(2 * time.Second):
+		t.Fatal("no chat program constructed after matched")
+		return nil
+	}
+}
+
+// TestMatchedLaunchesChatSurface: the first matched constructs and runs the chat
+// program, and no payload content leaks into any log sink.
+func TestMatchedLaunchesChatSurface(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{
+		SessionID: "sess-SECRET",
+		Pseudonym: "pseud-SECRET",
+		Blurb:     "blurb-SECRET",
+		Opener:    "opener-SECRET",
+	}
+
+	f := waitChat(t, made)
+
+	// Give any (content-free) launch logging a moment to land, then scan every
+	// sink the loop can write to.
+	time.Sleep(50 * time.Millisecond)
+	for _, secret := range []string{"sess-SECRET", "pseud-SECRET", "blurb-SECRET", "opener-SECRET"} {
+		for name, s := range map[string]string{"stderr": h.errBuf.String(), "status": h.out.String(), "program": f.printed()} {
+			if strings.Contains(s, secret) {
+				t.Fatalf("%s leaked matched payload %q:\n%s", name, secret, s)
+			}
+		}
+	}
+}
+
+// TestLeaveIntentReturnsToStatusLine: the leave intent logs a content-free line
+// through the program, tears the surface down with a clean Quit, and the loop
+// keeps running (the process stays alive).
+func TestLeaveIntentReturnsToStatusLine(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	f.notify(chatui.IntentLeave)
+
+	waitUntil(t, "the content-free leave log line", func() bool {
+		return strings.Contains(f.printed(), "leave requested")
+	})
+	if strings.Contains(f.printed(), "\x1b") {
+		t.Fatalf("leave log went to a raw sink, not the program: %q", f.printed())
+	}
+
+	select {
+	case <-f.quit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("leave did not stop the chat program")
+	}
+	if f.wasKilled() {
+		t.Fatal("leave Killed the program instead of a clean Quit")
+	}
+
+	// The loop is still running.
+	select {
+	case err := <-h.done:
+		t.Fatalf("loop returned %v after a leave; the process must stay alive", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// And a fresh matched can open the surface again.
+	h.client.matched <- proto.Matched{Opener: "o2"}
+	waitChat(t, made)
+}
+
+// TestSecondMatchedWhileChatActiveIsIgnored: a stray second matched frame while
+// the surface is already up does not construct a second program.
+func TestSecondMatchedWhileChatActiveIsIgnored(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	waitChat(t, made)
+
+	h.client.matched <- proto.Matched{Opener: "o-again"}
+	select {
+	case <-made:
+		t.Fatal("a second matched constructed a second chat program")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestStatusLineSuppressedWhileChatActive: while the surface owns the pane, no
+// status-line copy is written — but wire frames still flow.
+func TestStatusLineSuppressedWhileChatActive(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	waitChat(t, made)
+
+	snapshot := h.out.String()
+
+	// A reconnect notice (whose status phase is gated) and a transcript turn
+	// (whose debounce flush also calls showPhase) — neither may touch the pane.
+	h.client.events <- wsclient.Event{Kind: wsclient.Reconnecting}
+	h.events <- transcript.Event{Kind: transcript.TurnStart}
+
+	// The frame still goes on the wire (only sl.Show is gated).
+	h.waitSent(t, "ready")
+
+	time.Sleep(60 * time.Millisecond)
+	if got := h.out.String(); got != snapshot {
+		t.Fatalf("status line wrote while the chat surface was active:\nbefore: %q\nafter:  %q", snapshot, got)
+	}
+}
+
+// TestChatKilledWhenQuitIgnored: a wedged program that never returns on Quit is
+// Kill()ed after the grace window and the loop still tears down and exits.
+func TestChatKilledWhenQuitIgnored(t *testing.T) {
+	made := stubChatProgram(t, func(f *fakeChatProgram) { f.ignoreQuit = true })
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	h.client.endRunWith(wsclient.ResultSessionEnded)
+
+	select {
+	case err := <-h.done:
+		if err != nil {
+			t.Fatalf("loop returned %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop hung on a Quit-ignoring chat program instead of Kill()ing it")
+	}
+	if !f.wasKilled() {
+		t.Fatal("teardown did not Kill() a program that ignored Quit")
+	}
+}
+
+// TestSessionEndedTearsDownChatSurface: session_ended stops the chat program and
+// the loop returns nil (exit code 0).
+func TestSessionEndedTearsDownChatSurface(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	h.client.endRunWith(wsclient.ResultSessionEnded)
+
+	select {
+	case <-f.quit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session_ended did not stop the chat program")
+	}
+	select {
+	case err := <-h.done:
+		if err != nil {
+			t.Fatalf("loop returned %v on session_ended, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop did not return after session_ended mid-chat")
+	}
+}
+
+// TestContextCancelTearsDownChatSurface: a ctx cancel stops the chat program and
+// the loop returns nil.
+func TestContextCancelTearsDownChatSurface(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	h.cancel()
+
+	select {
+	case <-f.quit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ctx cancel did not stop the chat program")
+	}
+	select {
+	case err := <-h.done:
+		if err != nil {
+			t.Fatalf("loop returned %v on ctx cancel, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop did not return after ctx cancel mid-chat")
+	}
+}
+
+// TestBlockReportIntentsLoggedContentFree: block/report log a content-free line
+// through the program (not a raw sink) and leave the surface running.
+func TestBlockReportIntentsLoggedContentFree(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	f.notify(chatui.IntentBlock)
+	f.notify(chatui.IntentReport)
+
+	waitUntil(t, "the block log line", func() bool {
+		return strings.Contains(f.printed(), "block requested")
+	})
+	waitUntil(t, "the report log line", func() bool {
+		return strings.Contains(f.printed(), "report requested")
+	})
+	// Routed through the program, not written raw to stderr mid-frame.
+	if strings.Contains(h.errBuf.String(), "block requested") || strings.Contains(h.errBuf.String(), "report requested") {
+		t.Fatalf("intent log went raw to stderr, not through the program:\n%s", h.errBuf.String())
+	}
+
+	// The surface is still up: block/report do not tear it down.
+	select {
+	case <-f.quit:
+		t.Fatal("block/report stopped the chat program")
+	case <-time.After(120 * time.Millisecond):
 	}
 }
