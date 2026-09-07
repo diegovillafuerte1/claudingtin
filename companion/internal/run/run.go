@@ -19,6 +19,9 @@ import (
 	"os"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/diegovillafuerte1/claudingtin/companion/internal/chatui"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/safety"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/statusline"
 	"github.com/diegovillafuerte1/claudingtin/companion/internal/transcript"
@@ -123,7 +126,40 @@ type stateClient interface {
 	Run(ctx context.Context) wsclient.Result
 	SendState(ctx context.Context, msg any) error
 	Events() <-chan wsclient.Event
+	Matched() <-chan proto.Matched
 }
+
+// chatProgram is the slice of *tea.Program that loop drives, behind a seam so
+// run_test.go can substitute a fake and never stand up a real terminal.
+//
+// Println is how the content-free intent log lines reach the operator without
+// tearing the live frame: *tea.Program.Println prints above the rendered
+// surface and is coordinated with the renderer, where a bare write to cfg.Err
+// (the same tty) would land mid-frame and corrupt it.
+type chatProgram interface {
+	Run() (tea.Model, error)
+	Println(...any)
+	Quit()
+	Kill()
+}
+
+// newChatProgram builds the real Bubble Tea chat program for a match. It is a
+// package var so tests can replace it. Signals stay with the process's own
+// signal.NotifyContext (WithoutSignalHandler) so a SIGINT still cancels ctx and
+// unwinds everything, chat included.
+var newChatProgram = func(ctx context.Context, cfg Config, m proto.Matched, notify func(chatui.Intent)) chatProgram {
+	return tea.NewProgram(
+		chatui.New(m, chatui.WithNotify(notify)),
+		tea.WithContext(ctx),
+		tea.WithInput(cfg.In),
+		tea.WithOutput(cfg.Out),
+		tea.WithoutSignalHandler(),
+	)
+}
+
+// chatQuitGrace bounds how long teardown waits for a Quit()'d chat program to
+// return before Kill()ing it. Package var so tests can shrink it.
+var chatQuitGrace = 2 * time.Second
 
 // wireState is the companion's view of the model's think-time, as it maps to the
 // wire.
@@ -169,6 +205,72 @@ func loop(
 	sent := stateBusy
 	haveSent := false
 
+	// Chat surface state. It is launched on the first `matched` and lives only
+	// while a match is active; the status line is suppressed for its duration.
+	var (
+		chat        chatProgram
+		chatActive  bool
+		chatDone    chan struct{}
+		chatIntents chan chatui.Intent
+	)
+
+	// showPhase is sl.Show gated on the chat surface: while the chat program
+	// owns the pane, the status line writes nothing.
+	showPhase := func(p statusline.Phase) {
+		if chatActive {
+			return
+		}
+		sl.Show(p)
+	}
+
+	launchChat := func(m proto.Matched) {
+		chatIntents = make(chan chatui.Intent, 8)
+		ci := chatIntents
+		notify := func(i chatui.Intent) {
+			// Non-blocking: if loop is mid-teardown and the buffer is full, a
+			// dropped block/report keystroke is fine (leave also returns
+			// tea.Quit from the model, so it is never lost).
+			select {
+			case ci <- i:
+			default:
+			}
+		}
+		chat = newChatProgram(ctx, cfg, m, notify)
+		chatActive = true
+		chatDone = make(chan struct{})
+		go func(p chatProgram, done chan struct{}) {
+			_, _ = p.Run()
+			close(done)
+		}(chat, chatDone)
+	}
+
+	// stopChat tears the chat program down (Quit, then Kill on a grace timeout)
+	// and, when resume is true, hands the pane back to the status line.
+	stopChat := func(resume bool) {
+		if !chatActive {
+			return
+		}
+		chat.Quit()
+		select {
+		case <-chatDone:
+		case <-time.After(chatQuitGrace):
+			chat.Kill()
+			// Bounded again: a wedged program that ignores Kill must not hang
+			// loop forever — proceed with teardown regardless.
+			select {
+			case <-chatDone:
+			case <-time.After(chatQuitGrace):
+			}
+		}
+		chatActive = false
+		chat = nil
+		chatIntents = nil
+		chatDone = nil
+		if resume {
+			sl.Show(phaseFor(desired))
+		}
+	}
+
 	debounce := time.NewTimer(time.Hour)
 	debounce.Stop()
 	debouncePending := false
@@ -198,7 +300,7 @@ func loop(
 		if !haveSent || desired != sent {
 			pushState()
 		}
-		sl.Show(phaseFor(desired))
+		showPhase(phaseFor(desired))
 	}
 
 	var lastWatchErr error
@@ -206,6 +308,7 @@ func loop(
 	for {
 		select {
 		case <-ctx.Done():
+			stopChat(false)
 			<-clientDone
 			return nil
 
@@ -214,13 +317,18 @@ func loop(
 			case wsclient.ResultPleaseUpdate:
 				// One notice, stop reconnecting, stay alive so the user can
 				// read it. No key, no transcript content.
+				stopChat(false)
 				fmt.Fprintln(cfg.Err, "companion: the server asked this build to update; it will not reconnect until you install a newer companion")
 				sl.Show(statusline.PhaseUpdateNeeded)
 				<-ctx.Done()
 				return nil
 			case wsclient.ResultSessionEnded:
+				// The process returns nil right after, so there is no status
+				// line to hand back to — resume:false avoids a stale flash.
+				stopChat(false)
 				return nil
 			default: // ResultContextDone
+				stopChat(false)
 				return nil
 			}
 
@@ -232,6 +340,7 @@ func loop(
 				// same select; if this branch is the one picked, it is still a
 				// normal shutdown — exit 0, never errWatchStopped.
 				if ctx.Err() != nil {
+					stopChat(false)
 					<-clientDone
 					return nil
 				}
@@ -291,10 +400,48 @@ func loop(
 				// Connected is never lost even while loop is busy in a slow
 				// SendState — the re-announce below always runs.
 				pushState()
-				sl.Show(phaseFor(desired))
+				showPhase(phaseFor(desired))
 			case wsclient.Reconnecting:
-				sl.Show(statusline.PhaseReconnecting)
+				showPhase(statusline.PhaseReconnecting)
 			}
+
+		case m := <-client.Matched():
+			// Story 2.3: the first matched opens the chat surface. A stray
+			// second one while it is already up is ignored (Epic 3 owns
+			// re-enqueue and re-match).
+			if !chatActive {
+				launchChat(m)
+			}
+
+		case i := <-chatIntents:
+			// block / report / leave are logged content-free here — no message
+			// text, no account key, nothing on the wire (Epics 3–4). The log
+			// goes through the program (chat.Println) so it does not corrupt the
+			// live frame. leave also tears the surface down.
+			switch i {
+			case chatui.IntentLeave:
+				if chat != nil {
+					chat.Println("companion: leave requested from the chat surface")
+				}
+				stopChat(true)
+			case chatui.IntentBlock:
+				if chat != nil {
+					chat.Println("companion: block requested from the chat surface")
+				}
+			case chatui.IntentReport:
+				if chat != nil {
+					chat.Println("companion: report requested from the chat surface")
+				}
+			default:
+				if chat != nil {
+					chat.Println("companion: unrecognized chat intent")
+				}
+			}
+
+		case <-chatDone:
+			// The chat program exited on its own (its context ended, or an
+			// internal error). Hand the pane back unless we are shutting down.
+			stopChat(ctx.Err() == nil)
 		}
 	}
 }

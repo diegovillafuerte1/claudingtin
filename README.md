@@ -79,6 +79,25 @@ failure (empty `transcript-path`, an unusable `server-url`, config-dir
 resolution, account-key load, an unreadable `safety-ack`) or a fatal runtime
 error such as the transcript watch dying.
 
+### Chat surface
+
+On a `matched` frame the companion opens a text chat surface (Bubble Tea v2) in
+its own pane, in place of the status line, and hands the pane back when the
+session ends. It shows, all at once: a header with the peer's pseudonym and
+optional blurb (both blank until profiles land, so a neutral placeholder name
+renders), a scrollable history whose first entry is the backend's opener, a
+length-capped input box (2000 runes client-side; keystrokes past the cap are
+refused and a paste is truncated), and an always-visible block / report / leave
+("my Claude came back") affordance. There is no file, image, audio, or
+attachment control anywhere, and no read-receipt state is ever shown. Peer and
+opener text is rendered inert — printable characters and newlines only; every
+ESC / control byte is dropped so no ANSI, CSI, or OSC sequence reaches the
+terminal, and markup and links are shown as the literal characters typed, never
+interpreted. In this build nothing is put on the wire: pressing Enter appends
+your own line to the history optimistically (keyed by a fresh `client_msg_id`),
+and block / report / leave only raise a content-free intent the companion logs.
+The real message relay and the searching → matched "spin" are later stories.
+
 ### First run
 
 Before the transcript is watched or any websocket is opened, the companion
@@ -130,7 +149,7 @@ the companion resolves this path itself via `identity.DefaultConfigDir()`.
 
 ## Development
 
-Requires Go 1.27.x. Third-party dependencies are `github.com/fsnotify/fsnotify` (pinned `v1.10.1`, the companion's transcript tailer) and `github.com/coder/websocket` (pinned `v1.8.15`, the companion↔backend websocket, also used by `backend`); `proto` and `plugin` stay stdlib-only. The first build needs module downloads (or a primed module cache) to fetch them; each module's `go.sum` keeps that reproducible. After that, no network access is needed to build or test.
+Requires Go 1.27.x. Third-party dependencies are `github.com/fsnotify/fsnotify` (pinned `v1.10.1`, the companion's transcript tailer), `github.com/coder/websocket` (pinned `v1.8.15`, the companion↔backend websocket, also used by `backend`), and the Bubble Tea v2 stack — `charm.land/bubbletea/v2`, `charm.land/bubbles/v2`, `charm.land/lipgloss/v2` — for the companion chat surface; `proto` and `plugin` stay stdlib-only. The first build needs module downloads (or a primed module cache) to fetch them; each module's `go.sum` keeps that reproducible. After that, no network access is needed to build or test.
 
 From the repository root (Go's `./...` does not span workspace modules on its own, so name them):
 
