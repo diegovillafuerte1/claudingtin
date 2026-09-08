@@ -148,10 +148,11 @@ func insideTmux(getenv func(string) string) bool {
 // once-per-session lock, resolves the companion binary, and — when everything
 // lines up — places the companion beside the Claude session. Inside tmux
 // ($TMUX set) it asks tmuxRun for an adjacent, unfocused split-window pane
-// running the companion with args [transcriptPath, "", ""]; with no tmux, or if
-// that split fails, it asks spawn to start the companion detached with the same
-// args and, only when the spawn succeeds, writes the one-line placementHint to
-// stdout.
+// running the companion with args [transcriptPath, "", ""]. Otherwise it asks
+// placePane to try the other scriptable multiplexers (WezTerm, Zellij, Kitty,
+// Windows Terminal) the same way. With none of those — or if every attempt
+// fails — it asks spawn to start the companion detached with the same args and,
+// only when the spawn succeeds, writes the one-line placementHint to stdout.
 //
 // It never calls os.Exit. It returns nil whenever it deliberately does nothing
 // (opted out, unparseable input, no transcript path, no session id to dedup on,
@@ -206,7 +207,17 @@ func launch(stdin io.Reader, getenv func(string) string, tempDir string, stdout 
 		}
 	}
 
-	// No tmux, or the split failed: Story 1.7's detached spawn, unchanged. The
+	// Not tmux (or the tmux split failed): try the other terminal multiplexers
+	// that expose a scriptable "split a pane and run this" CLI — WezTerm, Zellij,
+	// Kitty, Windows Terminal (Epic 2 retro F10). Each is detected by its own
+	// env var and any failure falls through, exactly like the tmux path. A pane
+	// placed this way has a real PTY, so the companion's first-run gate works
+	// there too.
+	if placePane(getenv, bin, args) {
+		return nil
+	}
+
+	// No multiplexer we can drive: Story 1.7's detached spawn, unchanged. The
 	// one-line hint is written only once the spawn has actually started — a
 	// spawn failure stays exactly as silent as 1.7 (the thin main still writes
 	// its single non-identifying stderr line).
