@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-01-2026 02:10
-last_updated: 09-08-2026 00:47
+last_updated: 09-08-2026 01:00
 project: claudingtin
 project_key: NOKEY
 tracking_system: file-system
@@ -216,9 +216,14 @@ action_items:
     epic: 2
     action: "Evidence gap: confirm whether per-story review layers ran for Stories
       2-3 and 2-5; if they did, land their surviving findings in deferred-work.md
-      for parity with 2-1/2-2/2-4."
+      for parity with 2-1/2-2/2-4. RESOLVED 2026-09-08: they ran — PR #16 (Story
+      2.3, ~18 patch findings applied) and PR #18 (Story 2.5, 4 test-coverage gaps
+      closed) descriptions are the review record, same blind-hunter/edge-case-hunter/verification-gap
+      layers as 2-1/2-2/2-4. All findings patched in-commit, none deferred, so no
+      deferred-work.md rows are owed. F6 (missed by the 2-3 review, caught by the
+      retro seam pass) is tracked separately as epic-2-retro-item-9 (fix-now)."
     owner: "Diego"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
   - id: "epic-2-retro-item-17-f10-epic-3-story-replace-the-single-tmux"
     epic: 2
