@@ -145,13 +145,15 @@ type stateClient interface {
 // chatProgram is the slice of *tea.Program that loop drives, behind a seam so
 // run_test.go can substitute a fake and never stand up a real terminal.
 //
-// Println is how the content-free intent log lines reach the operator without
-// tearing the live frame: *tea.Program.Println prints above the rendered
-// surface and is coordinated with the renderer, where a bare write to cfg.Err
-// (the same tty) would land mid-frame and corrupt it.
+// loop reaches the running surface only through Send: it is documented as a
+// no-op once the program has exited, so it can never wedge loop during teardown.
+// *tea.Program.Println is deliberately not on this seam — it is a bare blocking
+// send with no escape once Run has returned, and the teardown window makes that
+// reachable from a buffered block/report/leave intent (Epic 2 retrospective F6).
+// A content-free operator line goes through Send as a chatui.LogLine (the model
+// emits tea.Println), or to cfg.Err when no surface is up.
 type chatProgram interface {
 	Run() (tea.Model, error)
-	Println(...any)
 	Send(tea.Msg)
 	Quit()
 	Kill()
@@ -342,6 +344,21 @@ func loop(
 		if resume {
 			sl.Show(phaseFor(desired))
 		}
+	}
+
+	// chatLog writes a content-free operator breadcrumb. While a chat surface is
+	// up it goes through chat.Send (a no-op if the program has already exited, so
+	// it never blocks the loop) and the model prints it above the live frame; a
+	// breadcrumb dropped because the surface just went away is acceptable — the
+	// frame it would have annotated is gone. With no surface up it goes to
+	// cfg.Err. It never calls chat.Println: that blocks forever once Run has
+	// returned, which a buffered intent in the teardown window can reach (F6).
+	chatLog := func(line string) {
+		if chatActive && chat != nil {
+			chat.Send(chatui.LogLine{Text: line})
+			return
+		}
+		fmt.Fprintln(cfg.Err, line)
 	}
 
 	// launchSearch raises the searching spinner. Guarded by its one call site to
@@ -559,35 +576,29 @@ func loop(
 		case om := <-chatSends:
 			// The chat surface echoed the user's own line optimistically and
 			// asked us to put it on the wire. This is the only goroutine that
-			// writes the socket for chat. On failure, one content-free line
-			// through the program — no text, no id, nothing raw to the tty.
-			if err := client.SendChat(ctx, proto.ChatMsg{ClientMsgID: om.ClientMsgID, Text: om.Text}); err != nil && chat != nil {
-				chat.Println("companion: a chat line could not be sent")
+			// writes the socket for chat. On failure, one content-free
+			// breadcrumb — no text, no id, nothing raw to the tty.
+			if err := client.SendChat(ctx, proto.ChatMsg{ClientMsgID: om.ClientMsgID, Text: om.Text}); err != nil {
+				chatLog("companion: a chat line could not be sent")
 			}
 
 		case i := <-chatIntents:
 			// block / report / leave are logged content-free here — no message
-			// text, no account key, nothing on the wire (Epics 3–4). The log
-			// goes through the program (chat.Println) so it does not corrupt the
-			// live frame. leave also tears the surface down.
+			// text, no account key, nothing on the wire (Epics 3–4). leave also
+			// tears the surface down: it does so first, then writes the
+			// breadcrumb to the now-free tty and repaints the status line (the
+			// same order the please_update path uses).
 			switch i {
 			case chatui.IntentLeave:
-				if chat != nil {
-					chat.Println("companion: leave requested from the chat surface")
-				}
-				stopChat(true)
+				stopChat(false)
+				fmt.Fprintln(cfg.Err, "companion: leave requested from the chat surface")
+				showPhase(phaseFor(desired))
 			case chatui.IntentBlock:
-				if chat != nil {
-					chat.Println("companion: block requested from the chat surface")
-				}
+				chatLog("companion: block requested from the chat surface")
 			case chatui.IntentReport:
-				if chat != nil {
-					chat.Println("companion: report requested from the chat surface")
-				}
+				chatLog("companion: report requested from the chat surface")
 			default:
-				if chat != nil {
-					chat.Println("companion: unrecognized chat intent")
-				}
+				chatLog("companion: unrecognized chat intent")
 			}
 
 		case <-chatDone:

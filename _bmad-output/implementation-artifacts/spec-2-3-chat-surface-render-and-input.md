@@ -102,6 +102,9 @@ context:
 
 ## Spec Change Log
 
+- **2026-09-08 (retro F2, post-hoc):** the frozen "Always" rule described `inert()` as "keep printable runes and `\n`; neutralize every C0 byte except `\n` … DEL … C1 … and ESC". The implementation went further during review: it whitelists on `unicode.IsGraphic` (plus U+200D, the emoji ZWJ) and drops *every* other non-graphic format code point — zero-width space, word joiner, and the bidi overrides behind Trojan-Source display spoofing. This is a strengthening of the frozen intent, not a departure from it, and `companion/internal/chatui/inert.go` reconciles the two in its doc comment. Recorded here after the fact per Epic 2 retrospective finding F2 (a review that hardens a frozen-I/O rule must leave a trace). No behavioural regression: everything the frozen wording required to be dropped is still dropped.
+- **2026-09-08 (retro F6, post-hoc):** `run.loop` no longer calls `*tea.Program.Println` — a blocking send with no escape once `Run()` has returned, reachable from a buffered block/report/leave intent in the teardown window. Content-free operator breadcrumbs now go through `*tea.Program.Send` as a `chatui.LogLine` (the model emits `tea.Println`), or to `cfg.Err` when no surface is up; `leave` tears the surface down first, then writes to `cfg.Err`. The `chatProgram` seam dropped its `Println` method. See `epic-2-retro-2026-09-07` finding F6.
+
 ## Design Notes
 
 **Launch alongside the status line, not replace it.** The Epic 1 `run.loop` + `statusline` plain-line contract is pinned by ~20 tests asserting exact copy on an `io.Writer`. Story 2.5 owns the `queued` state and the searching→matched transition — that is where a unified Bubble Tea program subsuming the status line belongs. Story 2.3 keeps blast radius to "additive surface, shown only during a match" so 2.4 (relay) and 2.5 (spin) compose onto it.

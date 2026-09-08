@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1251,8 +1250,9 @@ func TestRunGateAbortReturnsNil(t *testing.T) {
 
 // fakeChatProgram stands in for *tea.Program so the loop's launch/teardown is
 // exercised with no PTY. Run blocks until Quit (or, when ignoreQuit is set, only
-// until Kill). Println captures the content-free intent lines loop routes
-// through the program.
+// until Kill). Send captures every injected message; printed() pulls the
+// content-free operator breadcrumbs (chatui.LogLine) back out of that stream —
+// loop reaches the surface only through Send now, never Println (F6).
 type fakeChatProgram struct {
 	notify     func(chatui.Intent)
 	send       func(clientMsgID, text string)
@@ -1260,11 +1260,11 @@ type fakeChatProgram struct {
 	quit       chan struct{}
 	kill       chan struct{}
 	ran        chan struct{}
+	exited     chan struct{} // closed after Run returns
 	ignoreQuit bool
 
 	mu       sync.Mutex
 	killed   bool
-	prints   []string
 	received []tea.Msg
 }
 
@@ -1275,13 +1275,8 @@ func (f *fakeChatProgram) Run() (tea.Model, error) {
 	} else {
 		<-f.quit
 	}
+	close(f.exited)
 	return nil, nil
-}
-
-func (f *fakeChatProgram) Println(args ...any) {
-	f.mu.Lock()
-	f.prints = append(f.prints, fmt.Sprint(args...))
-	f.mu.Unlock()
 }
 
 func (f *fakeChatProgram) Send(msg tea.Msg) {
@@ -1324,10 +1319,19 @@ func (f *fakeChatProgram) wasKilled() bool {
 	return f.killed
 }
 
+// printed joins the content-free operator breadcrumbs loop routed into the
+// surface as chatui.LogLine messages — the Send-based replacement for the old
+// *tea.Program.Println path (F6).
 func (f *fakeChatProgram) printed() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return strings.Join(f.prints, "\n")
+	var lines []string
+	for _, m := range f.received {
+		if ll, ok := m.(chatui.LogLine); ok {
+			lines = append(lines, ll.Text)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // stubChatProgram swaps newChatProgram for a fake and hands back a channel that
@@ -1351,6 +1355,7 @@ func stubChatProgram(t *testing.T, opts ...func(*fakeChatProgram)) <-chan *fakeC
 			quit:   make(chan struct{}),
 			kill:   make(chan struct{}),
 			ran:    make(chan struct{}),
+			exited: make(chan struct{}),
 		}
 		f.model = newChatModel(m, notify, send)
 		for _, o := range opts {
@@ -1406,9 +1411,10 @@ func TestMatchedLaunchesChatSurface(t *testing.T) {
 	}
 }
 
-// TestLeaveIntentReturnsToStatusLine: the leave intent logs a content-free line
-// through the program, tears the surface down with a clean Quit, and the loop
-// keeps running (the process stays alive).
+// TestLeaveIntentReturnsToStatusLine: the leave intent tears the surface down
+// with a clean Quit *first*, then writes the content-free breadcrumb to the
+// now-free cfg.Err (never back into the program — F6), and the loop keeps
+// running (the process stays alive).
 func TestLeaveIntentReturnsToStatusLine(t *testing.T) {
 	made := stubChatProgram(t)
 	h := startLoop(t)
@@ -1418,13 +1424,6 @@ func TestLeaveIntentReturnsToStatusLine(t *testing.T) {
 
 	f.notify(chatui.IntentLeave)
 
-	waitUntil(t, "the content-free leave log line", func() bool {
-		return strings.Contains(f.printed(), "leave requested")
-	})
-	if strings.Contains(f.printed(), "\x1b") {
-		t.Fatalf("leave log went to a raw sink, not the program: %q", f.printed())
-	}
-
 	select {
 	case <-f.quit:
 	case <-time.After(2 * time.Second):
@@ -1432,6 +1431,14 @@ func TestLeaveIntentReturnsToStatusLine(t *testing.T) {
 	}
 	if f.wasKilled() {
 		t.Fatal("leave Killed the program instead of a clean Quit")
+	}
+
+	waitUntil(t, "the content-free leave breadcrumb on cfg.Err", func() bool {
+		return strings.Contains(h.errBuf.String(), "leave requested from the chat surface")
+	})
+	// The breadcrumb must not be pushed back into the (now dead) program.
+	if strings.Contains(f.printed(), "leave requested") {
+		t.Fatalf("leave breadcrumb went into the program instead of cfg.Err: %q", f.printed())
 	}
 
 	// The loop is still running.
@@ -1444,6 +1451,42 @@ func TestLeaveIntentReturnsToStatusLine(t *testing.T) {
 	// And a fresh matched can open the surface again.
 	h.client.matched <- proto.Matched{Opener: "o2"}
 	waitChat(t, made)
+}
+
+// TestIntentRacingChatProgramExitDoesNotWedgeLoop is the Epic 2 retrospective F6
+// guard. block/report/leave intents are buffered and then the chat program exits
+// on its own, so loop processes the exit and the buffered intents in an
+// arbitrary order. Before the fix the leave/block/report arms called
+// *tea.Program.Println, which blocks forever once Run has returned and nothing
+// drains the program — loop wedged whenever it picked the intent arm. loop must
+// now stay responsive whatever the order, and never call back into the exited
+// program.
+func TestIntentRacingChatProgramExitDoesNotWedgeLoop(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	// Buffer the intents, then let the program exit before loop drains them.
+	f.notify(chatui.IntentBlock)
+	f.notify(chatui.IntentLeave)
+	f.Quit()
+	select {
+	case <-f.exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake chat program did not exit after Quit")
+	}
+
+	// loop must not have wedged: a fresh matched still opens a surface and the
+	// process is alive.
+	h.client.matched <- proto.Matched{Opener: "o2"}
+	waitChat(t, made)
+	select {
+	case err := <-h.done:
+		t.Fatalf("loop returned %v; it must stay alive through a racing intent/exit", err)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 // TestSecondMatchedWhileChatActiveIsIgnored: a stray second matched frame while
