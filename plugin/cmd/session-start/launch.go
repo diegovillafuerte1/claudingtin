@@ -39,16 +39,22 @@ func parse(r io.Reader) (sessionStart, error) {
 	return in, nil
 }
 
-// optedOut reports whether CLAUDINGTIN_DISABLE is set to a truthy value
-// (1/true/yes/on, case-insensitive, surrounding whitespace ignored). Anything
-// else — including unset, empty, "0", "false" — means proceed.
-func optedOut(getenv func(string) string) bool {
-	switch strings.ToLower(strings.TrimSpace(getenv(disableEnvVar))) {
+// truthy reports whether an environment value reads as "on": 1/true/yes/on,
+// case-insensitive, surrounding whitespace ignored. Anything else — including
+// unset, empty, "0", "false" — is false. Shared by every opt-out knob
+// (CLAUDINGTIN_DISABLE, CLAUDINGTIN_NO_WINDOW) so they parse identically.
+func truthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "yes", "on":
 		return true
 	default:
 		return false
 	}
+}
+
+// optedOut reports whether CLAUDINGTIN_DISABLE is set to a truthy value.
+func optedOut(getenv func(string) string) bool {
+	return truthy(getenv(disableEnvVar))
 }
 
 // pluginRoot resolves the plugin's root directory: three levels up from the
@@ -98,10 +104,11 @@ func isExecutable(path string) bool {
 	return info.Mode().Perm()&0o111 != 0
 }
 
-// lockPath is <tempDir>/claudingtin-<sanitized session id>.lock. Any rune
-// outside [A-Za-z0-9._-] is replaced with '_' so the name is filesystem-safe.
-func lockPath(tempDir, sessionID string) string {
-	safe := strings.Map(func(r rune) rune {
+// sanitizeID replaces any rune outside [A-Za-z0-9._-] with '_' so a value is
+// safe to embed in a flat filename. Used for the per-session lock and — on
+// darwin — the self-deleting .command script name.
+func sanitizeID(s string) string {
+	return strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
 			return r
@@ -110,8 +117,12 @@ func lockPath(tempDir, sessionID string) string {
 		default:
 			return '_'
 		}
-	}, sessionID)
-	return filepath.Join(tempDir, lockPrefix+safe+".lock")
+	}, s)
+}
+
+// lockPath is <tempDir>/claudingtin-<sanitized session id>.lock.
+func lockPath(tempDir, sessionID string) string {
+	return filepath.Join(tempDir, lockPrefix+sanitizeID(sessionID)+".lock")
 }
 
 // acquire creates the per-session lock file with O_CREATE|O_EXCL. It returns an
@@ -151,8 +162,13 @@ func insideTmux(getenv func(string) string) bool {
 // running the companion with args [transcriptPath, "", ""]. Otherwise it asks
 // placePane to try the other scriptable multiplexers (WezTerm, Zellij, Kitty,
 // Windows Terminal) the same way. With none of those — or if every attempt
-// fails — it asks spawn to start the companion detached with the same args and,
-// only when the spawn succeeds, writes the one-line placementHint to stdout.
+// fails — it asks openWindow to bring the companion up in a brand-new OS
+// terminal window (macOS Terminal, a probed Linux emulator, or `cmd /c start`
+// on Windows), which hands it a real PTY so the first-run 18+/safety gate is
+// reachable from a bare terminal or an editor-integrated terminal too.
+// CLAUDINGTIN_NO_WINDOW truthy, no emulator, or a failed attempt falls through
+// to spawn, which starts the companion detached with the same args and, only
+// when the spawn succeeds, writes the one-line placementHint to stdout.
 //
 // It never calls os.Exit. It returns nil whenever it deliberately does nothing
 // (opted out, unparseable input, no transcript path, no session id to dedup on,
@@ -214,6 +230,21 @@ func launch(stdin io.Reader, getenv func(string) string, tempDir string, stdout 
 	// placed this way has a real PTY, so the companion's first-run gate works
 	// there too.
 	if placePane(getenv, bin, args) {
+		return nil
+	}
+
+	// Still no pane: open the companion in a brand-new OS terminal window —
+	// macOS Terminal via a self-deleting .command script, a probed Linux
+	// terminal emulator, or `cmd /c start` on Windows (see windowterm.go). A
+	// window gives the companion its own PTY, so its first-run 18+/safety gate
+	// is reachable even from a bare terminal or an editor-integrated terminal
+	// (Epic 1 finding F7). No emulator, CLAUDINGTIN_NO_WINDOW set, or a failed
+	// attempt drops through to the detached spawn below, exactly like the mux
+	// paths. Unlike the tmux / mux rungs above (a 3s deadline that kills the
+	// child, success only on exit 0), this rung's success is a liveness
+	// heuristic — the child still alive after windowSpawnGrace is taken as
+	// "window is up", and the child is never killed.
+	if openWindow(getenv, tempDir, in.SessionID, bin, args) {
 		return nil
 	}
 

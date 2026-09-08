@@ -168,6 +168,20 @@ the shell wrapper and the companion are untouched.
 
 ## Spec Change Log
 
+- **2026-09-08 — Epic 2 retro F10 / item 17** (`spec-epic-2-retro-item-17-windowed-placement-fallback.md`).
+  A new-OS-window rung was added to `launch()`, strictly between the `placePane`
+  block and the detached spawn: outside tmux/mux, when a terminal emulator is
+  available and `CLAUDINGTIN_NO_WINDOW` is unset, the companion is opened in a
+  brand-new OS terminal window (macOS Terminal via a self-deleting `.command`
+  script, the first probed Linux emulator, or `cmd /c start` on Windows) so it
+  inherits a real PTY and the first-run 18+/safety gate is reachable from a bare
+  terminal or an editor-integrated terminal. The **"prints exactly one line"** AC
+  branch now fires only when no window can be opened (opt-out set, no emulator on
+  PATH, or the attempt failed within `windowSpawnGrace`). **Kept:** the
+  tmux-first ordering, the `muxStrategies` registry ahead of the window rung, the
+  byte-identical hint on the detached-spawn path, and the fail-open contract
+  (never block, never non-zero, end at `main`'s single `os.Exit(0)`).
+
 ## Design Notes
 
 - **Launcher, not companion.** The spine lists "pane placement" under `companion`,

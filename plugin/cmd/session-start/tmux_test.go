@@ -98,6 +98,7 @@ func TestLauncherEndToEndTmuxSplit(t *testing.T) {
 			"CLAUDE_PLUGIN_ROOT="+root,
 			"TMPDIR="+t.TempDir(),
 			"PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+			"CLAUDINGTIN_NO_WINDOW=1", // no real terminal window during tests
 		)
 		cmd.Env = append(cmd.Env, extraEnv...)
 		cmd.Stdin = strings.NewReader(`{"session_id":"e2etmux","transcript_path":"` + transcript + `"}`)

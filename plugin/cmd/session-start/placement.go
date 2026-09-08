@@ -23,11 +23,12 @@ import (
 // server over that env var, so the call returns in milliseconds; the timeout
 // only guards a wedged server.
 //
-// Not covered here and left for a follow-up: iTerm2 (needs AppleScript / the
-// Python API and an automation-permission prompt) and the plain-terminal
-// windowed fallback (open the companion in a new OS window so a bare terminal /
-// editor-integrated terminal also gets a PTY — the remaining half of Epic 1
-// finding F7).
+// Not covered here: iTerm2 (needs AppleScript / the Python API and an
+// automation-permission prompt — intentionally not built). The plain-terminal
+// windowed fallback — open the companion in a new OS window so a bare terminal
+// / editor-integrated terminal also gets a PTY, the remaining half of Epic 1
+// finding F7 — now lives in windowterm.go, the rung launch() tries after this
+// registry and before the detached spawn.
 
 // muxPlacementTimeout bounds one placement child. Like tmuxSplitTimeout it is a
 // backstop for a hung mux server, not the expected latency (which is a local
