@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-01-2026 02:10
-last_updated: 09-08-2026 02:30
+last_updated: 09-08-2026 04:00
 project: claudingtin
 project_key: NOKEY
 tracking_system: file-system
@@ -173,10 +173,14 @@ action_items:
     action: "F4/F5: Before Epic 3 adds session_ended routing / re-enqueue / grace
       to run.loop, extract the pane lifecycle (chat + search launch/stop/teardown,
       showPhase, the *Done arms) into a paneManager type with its own tests; folds
-      the launchChat/launchSearch + stopChat/stopSearch duplication."
+      the launchChat/launchSearch + stopChat/stopSearch duplication. DONE 2026-09-08:
+      paneManager extracted to companion/internal/run/panemanager.go; one shared
+      pane.start / pane.teardown back both surfaces (F5 fold); loop keeps its
+      for { select } and every case, delegating to pm.*; pure refactor with
+      run_test.go unchanged and go test -race ./... green; new panemanager_test.go."
     owner: "Diego"
-    status: open
-    ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/spec-epic-2-retro-item-10-panemanager-extraction.md"
   - id: "epic-2-retro-item-11-f7-give-the-hub-deliver-reports-success"
     epic: 2
     action: "F7: Give the hub deliver()-reports-success hardening an owner as an Epic

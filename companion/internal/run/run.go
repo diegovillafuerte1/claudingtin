@@ -18,6 +18,12 @@
 // status line writes nothing while either surface owns the pane. A burst that
 // ends while searching just stops the spinner locally here; real
 // return-to-spinner + re-enqueue semantics are Epic 3.
+//
+// Those two surfaces and their launch/stop/teardown, the showPhase gate, the
+// breadcrumb router, and the *Done / intents / sends select arms live on
+// paneManager (panemanager.go), lifted out of loop for Epic 2 retrospective
+// findings F4 (loop size) and F5 (launch/stop duplication). loop keeps its
+// for { select } and every case, and delegates pane work to pm.*.
 package run
 
 import (
@@ -237,7 +243,8 @@ func phaseFor(s wireState) statusline.Phase {
 }
 
 // loop is the event core, split out so run_test.go can drive it with a fake
-// watcher and a fake client.
+// watcher and a fake client. The pane lifecycle (chat surface + searching
+// spinner) is delegated to paneManager; loop keeps every select case.
 func loop(
 	ctx context.Context,
 	cfg Config,
@@ -255,150 +262,13 @@ func loop(
 	sent := stateBusy
 	haveSent := false
 
-	// Chat surface state. It is launched on the first `matched` and lives only
-	// while a match is active; the status line is suppressed for its duration.
-	var (
-		chat        chatProgram
-		chatActive  bool
-		chatDone    chan struct{}
-		chatIntents chan chatui.Intent
-		chatSends   chan chatui.OutboundMsg
-	)
-
-	// Searching-spinner state. It is launched on an inbound `queued` frame while
-	// the session is ready and unmatched, and torn down on `matched`, the burst
-	// ending, or any terminal path.
-	var (
-		search       searchProgram
-		searchActive bool
-		searchDone   chan struct{}
-	)
-
-	// showPhase is sl.Show gated on the two pane surfaces: while the chat
-	// program or the searching spinner owns the pane, the status line writes
-	// nothing.
-	showPhase := func(p statusline.Phase) {
-		if chatActive || searchActive {
-			return
-		}
-		sl.Show(p)
-	}
-
-	launchChat := func(m proto.Matched) {
-		chatIntents = make(chan chatui.Intent, 8)
-		ci := chatIntents
-		notify := func(i chatui.Intent) {
-			// Non-blocking: if loop is mid-teardown and the buffer is full, a
-			// dropped block/report keystroke is fine (leave also returns
-			// tea.Quit from the model, so it is never lost).
-			select {
-			case ci <- i:
-			default:
-			}
-		}
-		chatSends = make(chan chatui.OutboundMsg, 32)
-		cs := chatSends
-		send := func(clientMsgID, text string) {
-			// Fires synchronously inside the chat model's Update. Non-blocking:
-			// the actual socket write is done by loop below, off this goroutine,
-			// so a slow socket can never stall the UI. A full buffer during
-			// teardown just drops the line — the optimistic echo already showed
-			// it and v1 has no ack.
-			select {
-			case cs <- chatui.OutboundMsg{ClientMsgID: clientMsgID, Text: text}:
-			default:
-			}
-		}
-		chat = newChatProgram(ctx, cfg, m, notify, send)
-		chatActive = true
-		chatDone = make(chan struct{})
-		go func(p chatProgram, done chan struct{}) {
-			_, _ = p.Run()
-			close(done)
-		}(chat, chatDone)
-	}
-
-	// stopChat tears the chat program down (Quit, then Kill on a grace timeout)
-	// and, when resume is true, hands the pane back to the status line.
-	stopChat := func(resume bool) {
-		if !chatActive {
-			return
-		}
-		chat.Quit()
-		select {
-		case <-chatDone:
-		case <-time.After(chatQuitGrace):
-			chat.Kill()
-			// Bounded again: a wedged program that ignores Kill must not hang
-			// loop forever — proceed with teardown regardless.
-			select {
-			case <-chatDone:
-			case <-time.After(chatQuitGrace):
-			}
-		}
-		chatActive = false
-		chat = nil
-		chatIntents = nil
-		chatSends = nil
-		chatDone = nil
-		if resume {
-			sl.Show(phaseFor(desired))
-		}
-	}
-
-	// chatLog writes a content-free operator breadcrumb. While a chat surface is
-	// up it goes through chat.Send (a no-op if the program has already exited, so
-	// it never blocks the loop) and the model prints it above the live frame; a
-	// breadcrumb dropped because the surface just went away is acceptable — the
-	// frame it would have annotated is gone. With no surface up it goes to
-	// cfg.Err. It never calls chat.Println: that blocks forever once Run has
-	// returned, which a buffered intent in the teardown window can reach (F6).
-	chatLog := func(line string) {
-		if chatActive && chat != nil {
-			chat.Send(chatui.LogLine{Text: line})
-			return
-		}
-		fmt.Fprintln(cfg.Err, line)
-	}
-
-	// launchSearch raises the searching spinner. Guarded by its one call site to
-	// !chatActive && !searchActive && desired == stateReady, so a redelivered
-	// `queued` after a reconnect, or one that lands after the burst already
-	// ended, never starts a second spinner or a stray flash.
-	launchSearch := func() {
-		search = newSearchProgram(ctx, cfg)
-		searchActive = true
-		searchDone = make(chan struct{})
-		go func(p searchProgram, done chan struct{}) {
-			_, _ = p.Run()
-			close(done)
-		}(search, searchDone)
-	}
-
-	// stopSearch tears the spinner down (Quit, then Kill on a grace timeout),
-	// mirroring stopChat, and hands the pane back to the status line when resume
-	// is true.
-	stopSearch := func(resume bool) {
-		if !searchActive {
-			return
-		}
-		search.Quit()
-		select {
-		case <-searchDone:
-		case <-time.After(chatQuitGrace):
-			search.Kill()
-			select {
-			case <-searchDone:
-			case <-time.After(chatQuitGrace):
-			}
-		}
-		searchActive = false
-		search = nil
-		searchDone = nil
-		if resume {
-			sl.Show(phaseFor(desired))
-		}
-	}
+	// pm owns the two pane surfaces (chat program + searching spinner) and the
+	// launch/stop/teardown, showPhase gate, breadcrumb router, and *Done /
+	// intents / sends arms loop's select reads. Lifted out of loop for Epic 2
+	// retrospective F4 / F5 — see panemanager.go. resumePhase is a thunk so a
+	// teardown repaint reads loop's current `desired`, matching the old
+	// sl.Show(phaseFor(desired)) in stopChat / stopSearch.
+	pm := newPaneManager(ctx, cfg, sl, func() statusline.Phase { return phaseFor(desired) })
 
 	debounce := time.NewTimer(time.Hour)
 	debounce.Stop()
@@ -432,10 +302,10 @@ func loop(
 		// A burst that ends while searching just drops the spinner locally and
 		// returns the pane to the waiting phrase — Epic 3 owns real
 		// return-to-spinner + re-enqueue.
-		if searchActive && desired == stateBusy {
-			stopSearch(true)
+		if pm.searchActive() && desired == stateBusy {
+			pm.stopSearch(true)
 		}
-		showPhase(phaseFor(desired))
+		pm.showPhase(phaseFor(desired))
 	}
 
 	var lastWatchErr error
@@ -443,8 +313,7 @@ func loop(
 	for {
 		select {
 		case <-ctx.Done():
-			stopSearch(false)
-			stopChat(false)
+			pm.stopAll()
 			<-clientDone
 			return nil
 
@@ -453,8 +322,7 @@ func loop(
 			case wsclient.ResultPleaseUpdate:
 				// One notice, stop reconnecting, stay alive so the user can
 				// read it. No key, no transcript content.
-				stopSearch(false)
-				stopChat(false)
+				pm.stopAll()
 				fmt.Fprintln(cfg.Err, "companion: the server asked this build to update; it will not reconnect until you install a newer companion")
 				sl.Show(statusline.PhaseUpdateNeeded)
 				<-ctx.Done()
@@ -462,12 +330,10 @@ func loop(
 			case wsclient.ResultSessionEnded:
 				// The process returns nil right after, so there is no status
 				// line to hand back to — resume:false avoids a stale flash.
-				stopSearch(false)
-				stopChat(false)
+				pm.stopAll()
 				return nil
 			default: // ResultContextDone
-				stopSearch(false)
-				stopChat(false)
+				pm.stopAll()
 				return nil
 			}
 
@@ -479,8 +345,7 @@ func loop(
 				// same select; if this branch is the one picked, it is still a
 				// normal shutdown — exit 0, never errWatchStopped.
 				if ctx.Err() != nil {
-					stopSearch(false)
-					stopChat(false)
+					pm.stopAll()
 					<-clientDone
 					return nil
 				}
@@ -540,9 +405,9 @@ func loop(
 				// Connected is never lost even while loop is busy in a slow
 				// SendState — the re-announce below always runs.
 				pushState()
-				showPhase(phaseFor(desired))
+				pm.showPhase(phaseFor(desired))
 			case wsclient.Reconnecting:
-				showPhase(statusline.PhaseReconnecting)
+				pm.showPhase(statusline.PhaseReconnecting)
 			}
 
 		case <-client.Queued():
@@ -550,8 +415,8 @@ func loop(
 			// Raise the searching spinner — but only if nothing else owns the
 			// pane and the burst has not already ended. A redelivered `queued`
 			// after a reconnect finds searchActive already true and is a no-op.
-			if !chatActive && !searchActive && desired == stateReady {
-				launchSearch()
+			if !pm.anyActive() && desired == stateReady {
+				pm.launchSearch()
 			}
 
 		case m := <-client.Matched():
@@ -560,29 +425,27 @@ func loop(
 			// re-enqueue and re-match). The spinner (if any) is torn down here,
 			// in the same select-case as launchChat, so a chat_msg buffered
 			// behind this matched waits rather than drops.
-			if !chatActive {
-				stopSearch(false)
-				launchChat(m)
+			if !pm.chatActive() {
+				pm.stopSearch(false)
+				pm.launchChat(m)
 			}
 
 		case cm := <-client.ChatMsgs():
 			// An inbound peer line. Forward it to the live chat surface as a
 			// PeerMsg; if no chat is active it is dropped (no panic, nothing to
 			// cfg.Out).
-			if chatActive && chat != nil {
-				chat.Send(chatui.PeerMsg{ClientMsgID: cm.ClientMsgID, Text: cm.Text})
-			}
+			pm.sendPeer(cm.ClientMsgID, cm.Text)
 
-		case om := <-chatSends:
+		case om := <-pm.sends():
 			// The chat surface echoed the user's own line optimistically and
 			// asked us to put it on the wire. This is the only goroutine that
 			// writes the socket for chat. On failure, one content-free
 			// breadcrumb — no text, no id, nothing raw to the tty.
 			if err := client.SendChat(ctx, proto.ChatMsg{ClientMsgID: om.ClientMsgID, Text: om.Text}); err != nil {
-				chatLog("companion: a chat line could not be sent")
+				pm.log("companion: a chat line could not be sent")
 			}
 
-		case i := <-chatIntents:
+		case i := <-pm.intents():
 			// block / report / leave are logged content-free here — no message
 			// text, no account key, nothing on the wire (Epics 3–4). leave also
 			// tears the surface down: it does so first, then writes the
@@ -590,26 +453,26 @@ func loop(
 			// same order the please_update path uses).
 			switch i {
 			case chatui.IntentLeave:
-				stopChat(false)
+				pm.stopChat(false)
 				fmt.Fprintln(cfg.Err, "companion: leave requested from the chat surface")
-				showPhase(phaseFor(desired))
+				pm.showPhase(phaseFor(desired))
 			case chatui.IntentBlock:
-				chatLog("companion: block requested from the chat surface")
+				pm.log("companion: block requested from the chat surface")
 			case chatui.IntentReport:
-				chatLog("companion: report requested from the chat surface")
+				pm.log("companion: report requested from the chat surface")
 			default:
-				chatLog("companion: unrecognized chat intent")
+				pm.log("companion: unrecognized chat intent")
 			}
 
-		case <-chatDone:
+		case <-pm.chatDone():
 			// The chat program exited on its own (its context ended, or an
 			// internal error). Hand the pane back unless we are shutting down.
-			stopChat(ctx.Err() == nil)
+			pm.stopChat(ctx.Err() == nil)
 
-		case <-searchDone:
+		case <-pm.searchDone():
 			// The spinner program exited on its own (its context ended, or an
 			// internal error). Hand the pane back unless we are shutting down.
-			stopSearch(ctx.Err() == nil)
+			pm.stopSearch(ctx.Err() == nil)
 		}
 	}
 }
