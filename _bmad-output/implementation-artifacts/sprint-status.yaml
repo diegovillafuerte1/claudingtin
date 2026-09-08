@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-01-2026 02:10
-last_updated: 09-07-2026 15:52
+last_updated: 09-07-2026 23:59
 project: claudingtin
 project_key: NOKEY
 tracking_system: file-system
@@ -47,13 +47,13 @@ development_status:
   1-9-first-run-screen-and-18-gate-as-a-local-precondition: done
   epic-1-retrospective: done
 
-  epic-2: in-progress
+  epic-2: done
   2-1-fifo-queue-and-single-writer-pairing-loop: done
   2-2-curated-opener-set-and-per-match-selection: done
   2-3-chat-surface-render-and-input: done
   2-4-in-memory-message-relay: done
-  2-5-searching-and-matched-transition-with-the-spin: review
-  epic-2-retrospective: optional
+  2-5-searching-and-matched-transition-with-the-spin: done
+  epic-2-retrospective: done
 
   epic-3: backlog
   3-1-unified-session_ended-on-every-backend-side-end: backlog
@@ -155,3 +155,78 @@ action_items:
     owner: "Diego"
     status: done
     ref: "_bmad-output/implementation-artifacts/epic-1-e2e-proof-2026-09-06.md"
+  - id: "epic-2-retro-item-9-f6-fix-the-run-loop-hang-on-chat-println"
+    epic: 2
+    action: "F6: Fix the run.loop hang on chat.Println after the chat program exits
+      (gate chat.Println/chat.Send on a chatRunning flag cleared when Run() returns,
+      or drain <-chatDone before any buffered intent). Add a run_test.go case with
+      a blocking Println fake. Reachable ~50% per keyboard leave; also block/report."
+    owner: "Diego"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
+  - id: "epic-2-retro-item-10-f4-f5-before-epic-3-adds-session_ended-r"
+    epic: 2
+    action: "F4/F5: Before Epic 3 adds session_ended routing / re-enqueue / grace
+      to run.loop, extract the pane lifecycle (chat + search launch/stop/teardown,
+      showPhase, the *Done arms) into a paneManager type with its own tests; folds
+      the launchChat/launchSearch + stopChat/stopSearch duplication."
+    owner: "Diego"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
+  - id: "epic-2-retro-item-11-f7-give-the-hub-deliver-reports-success"
+    epic: 2
+    action: "F7: Give the hub deliver()-reports-success hardening an owner as an Epic
+      3 story alongside session_ended reliability + reconnect-grace resume. Until
+      then record the silent-drop-past-32-frame-buffer relay behaviour as an accepted
+      v1 deviation."
+    owner: "Diego"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
+  - id: "epic-2-retro-item-12-f3-reconcile-epics-md-fr-coverage-map-qu"
+    epic: 2
+    action: "F3: Reconcile epics.md FR Coverage Map — qualify 'FR17: Epic 2' as 'read-receipts-never
+      delivered; optional typing indicator not implemented, no v1 commitment'."
+    owner: "Diego"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
+  - id: "epic-2-retro-item-13-f2-record-review-driven-hardening-of-a-f"
+    epic: 2
+    action: "F2: Record review-driven hardening of a frozen-I/O rule in the spec (bump
+      review_loop_iteration or add a Spec Change Log line) — starting with spec-2-3
+      inert()."
+    owner: "Diego"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
+  - id: "epic-2-retro-item-14-f8-eager-validate-the-opener-set-call-ba"
+    epic: 2
+    action: "F8: Eager-validate the opener set — call backend.Openers() in backend/cmd/serve/main.go
+      and log.Fatal before 'go h.Run(...)' so a malformed openers.txt is a structured
+      startup fatal, not an unrecovered goroutine panic."
+    owner: "Diego"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
+  - id: "epic-2-retro-item-15-f9-add-a-second-leave-binding-esc-in-cha"
+    epic: 2
+    action: "F9: Add a second 'leave' binding (esc) in chatui, or document the ctrl+q
+      terminal flow-control caveat."
+    owner: "Diego"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
+  - id: "epic-2-retro-item-16-evidence-gap-confirm-whether-per-story-r"
+    epic: 2
+    action: "Evidence gap: confirm whether per-story review layers ran for Stories
+      2-3 and 2-5; if they did, land their surviving findings in deferred-work.md
+      for parity with 2-1/2-2/2-4."
+    owner: "Diego"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
+  - id: "epic-2-retro-item-17-f10-epic-3-story-replace-the-single-tmux"
+    epic: 2
+    action: "F10: Epic 3 story — replace the single tmux pane-placement path with
+      an env-detected placement strategy registry (tmux #1, then wezterm/kitty/zellij/iterm2/wt)
+      plus a 'new OS window' fallback that hands the companion a real PTY; this also
+      closes Epic-1 F7 (non-tmux first-run gate reads EOF and goes inert). Retire
+      epic-1-retro-item-4."
+    owner: "Diego"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
