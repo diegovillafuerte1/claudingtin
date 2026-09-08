@@ -110,8 +110,18 @@ nothing. An inbound peer `chat_msg` is rendered inert as a new history line; if
 it arrives with no chat surface up it is dropped. If a line cannot be sent (the
 socket is down) the companion prints one content-free "a chat line could not be
 sent" notice through the surface and carries on. block / report / leave only
-raise a content-free intent the companion logs. The searching → matched "spin"
-is a later story.
+raise a content-free intent the companion logs.
+
+While a `ready` session is left waiting for a match (the backend's `queued`
+frame), the pane shows a calm searching spinner — one warm line and an
+animation, no queue position, ETA, or "N online" count — and the status line
+stays quiet until it clears. A match that pairs immediately (no `queued`) skips
+it entirely. On `matched` the spinner is torn down and the chat surface opens
+with a brief, bounded, non-blocking "spin" flourish (a fixed row above the
+header for well under a second, then gone with a one-time viewport growth); the
+input is focused and peer lines land in history the whole time it plays. A burst
+that ends while searching just drops the spinner locally and the waiting line
+returns — real return-to-spinner and re-enqueue are a later epic.
 
 ### First run
 

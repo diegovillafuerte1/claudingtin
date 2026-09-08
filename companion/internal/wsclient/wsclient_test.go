@@ -390,6 +390,79 @@ func TestMatchedSurfacedToCaller(t *testing.T) {
 	}
 }
 
+// TestQueuedSurfacedToCaller: the server sends a proto.Queued; the client
+// delivers it on Queued() and keeps serving afterwards (a following matched
+// still arrives). wsclient has no log sink by construction, so "nothing is
+// logged" holds structurally with no assertion needed.
+func TestQueuedSurfacedToCaller(t *testing.T) {
+	shrinkBackoff(t)
+
+	want := proto.Matched{SessionID: "sess-after-queued", Opener: "hi"}
+	s := newWSServerWith(t, func(idx int, conn *websocket.Conn) {
+		qb, _ := proto.Encode(proto.Queued{})
+		_ = conn.Write(context.Background(), websocket.MessageText, qb)
+		// A later frame that must still be delivered — the queued did not end
+		// serving and did not stall the reader.
+		mb, _ := proto.Encode(want)
+		_ = conn.Write(context.Background(), websocket.MessageText, mb)
+	})
+	c := New(Config{URL: s.url(), AccountKey: "k"})
+	drainEvents(t, c)
+	_, res := runClient(t, c)
+
+	select {
+	case <-c.Queued():
+	case <-time.After(3 * time.Second):
+		t.Fatal("no value on Queued() after the server sent one")
+	}
+
+	select {
+	case got := <-c.Matched():
+		if got != want {
+			t.Fatalf("Matched() after queued delivered %+v, want %+v", got, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the matched frame behind queued never arrived — reader stalled")
+	}
+
+	select {
+	case r := <-res:
+		t.Fatalf("Run returned %v after queued + matched; it must keep serving", r)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestQueuedBufferFullDoesNotWedgeReader: Queued() is a cap-1 buffer and the
+// serve goroutine's send onto it is non-blocking (drop-on-full). With the test
+// never draining Queued(), two back-to-back queued frames fill then overflow
+// the buffer; the read goroutine must not wedge, so the session_ended written
+// behind them still ends Run.
+func TestQueuedBufferFullDoesNotWedgeReader(t *testing.T) {
+	shrinkBackoff(t)
+
+	s := newWSServerWith(t, func(idx int, conn *websocket.Conn) {
+		for i := 0; i < 2; i++ {
+			qb, _ := proto.Encode(proto.Queued{})
+			_ = conn.Write(context.Background(), websocket.MessageText, qb)
+		}
+		eb, _ := proto.Encode(proto.SessionEnded{})
+		_ = conn.Write(context.Background(), websocket.MessageText, eb)
+	})
+	c := New(Config{URL: s.url(), AccountKey: "k"})
+	drainEvents(t, c)
+	// Queued() is deliberately never read.
+	_, res := runClient(t, c)
+
+	select {
+	case got := <-res:
+		if got != ResultSessionEnded {
+			t.Fatalf("Run returned %v, want ResultSessionEnded — the read goroutine wedged on a full Queued buffer?", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return — the read goroutine wedged on the full cap-1 Queued buffer")
+	}
+}
+
 // TestChatMsgSurfacedToCaller: the server sends a proto.ChatMsg; the client
 // delivers it on ChatMsgs() with fields intact and keeps serving afterwards (a
 // following non-terminal frame is still ignored, Run does not return). wsclient

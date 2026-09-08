@@ -1,12 +1,13 @@
 // Package wsclient owns the companion's single websocket to the backend: it
 // dials, sends the version + account-key hello as the first frame after every
 // (re)connect, carries ready/busy state frames and outbound chat_msg frames
-// out, watches for the four inbound frames that matter (matched, chat_msg,
-// please_update, session_ended) — matched is surfaced on Matched() for run.loop
-// to open the chat surface, chat_msg on ChatMsgs() for run.loop to render as a
-// peer line, and the other two end Run — and reconnects with an exponentially
-// backed-off, fully jittered delay after any drop — forever, until the context
-// is cancelled or the server asks the client to update.
+// out, watches for the five inbound frames that matter (queued, matched,
+// chat_msg, please_update, session_ended) — queued is surfaced on Queued() for
+// run.loop to raise the searching spinner, matched on Matched() to open the
+// chat surface, chat_msg on ChatMsgs() to render as a peer line, and the last
+// two end Run — and reconnects with an exponentially backed-off, fully jittered
+// delay after any drop — forever, until the context is cancelled or the server
+// asks the client to update.
 //
 // It speaks nothing on the wire that is not a proto message, mirrors the
 // backend's framing (text frames, proto.Encode/Decode, a normal close on a
@@ -85,6 +86,7 @@ type Client struct {
 	accountKey string
 
 	events  chan Event
+	queued  chan proto.Queued
 	matched chan proto.Matched
 	chatMsg chan proto.ChatMsg
 
@@ -100,6 +102,7 @@ func New(cfg Config) *Client {
 		url:        cfg.URL,
 		accountKey: cfg.AccountKey,
 		events:     make(chan Event, 8),
+		queued:     make(chan proto.Queued, 1),
 		matched:    make(chan proto.Matched, 1),
 		chatMsg:    make(chan proto.ChatMsg, 64),
 	}
@@ -112,6 +115,14 @@ func New(cfg Config) *Client {
 // to its select within one frameWriteTimeout, so this cannot stall the client
 // for long.
 func (c *Client) Events() <-chan Event { return c.events }
+
+// Queued delivers the inbound proto.Queued frame to the caller. It is buffered
+// by one and never closed; run.loop drains it to raise the searching spinner.
+// queued is not a terminal frame — Run keeps serving after one. The reader
+// never blocks on it: the serve goroutine's send is non-blocking, so a queued
+// that arrives while the buffer is full is dropped — a redelivered queued after
+// a reconnect is a harmless no-op once the spinner is already up.
+func (c *Client) Queued() <-chan proto.Queued { return c.queued }
 
 // Matched delivers the inbound proto.Matched frame (fields intact) to the
 // caller. It is buffered by one and never closed; run.loop drains it to launch
@@ -259,8 +270,9 @@ const (
 // serve reads frames on a dedicated goroutine (so an outbound write and an
 // inbound session_ended can never deadlock, the same shape as the backend's
 // serveConn) until the context is cancelled, a read fails, or a terminal
-// inbound frame arrives. A proto.Matched is handed to the caller on c.matched
-// and serving continues; every other inbound frame is discarded.
+// inbound frame arrives. A proto.Queued / proto.Matched / proto.ChatMsg is
+// handed to the caller on its channel and serving continues; every other
+// non-terminal inbound frame is discarded.
 func (c *Client) serve(ctx context.Context, conn *websocket.Conn) serveResult {
 	readErr := make(chan struct{}, 1)
 	terminal := make(chan serveResult, 1)
@@ -280,6 +292,15 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn) serveResult {
 				continue // undecodable frame — discard
 			}
 			switch m := msg.(type) {
+			case proto.Queued:
+				// Not terminal: hand it to run.loop and keep serving. The send
+				// is non-blocking — a redelivered queued after a reconnect is a
+				// no-op once the spinner is up, and a terminal frame queued
+				// behind it must not wait.
+				select {
+				case c.queued <- m:
+				default:
+				}
 			case proto.Matched:
 				// Not terminal: hand it to run.loop and keep serving. The send
 				// is non-blocking — the channel is buffered by one, and if

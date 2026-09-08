@@ -1,8 +1,10 @@
 package chatui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"charm.land/bubbles/v2/key"
@@ -532,5 +534,222 @@ func TestPeerMessageSticksToBottomWhenAlreadyThere(t *testing.T) {
 	m, _ = step(t, m, PeerMsg{ClientMsgID: "p", Text: "another line"})
 	if !m.vp.AtBottom() {
 		t.Fatal("a peer line did not keep a bottom-anchored reader at the bottom")
+	}
+}
+
+// --- the intro "spin" flourish (Story 2.5) -------------------------------
+
+// cmdYields reports whether running cmd (recursing through a tea.BatchMsg)
+// produces a message of the same concrete type as want.
+func cmdYields(cmd tea.Cmd, want tea.Msg) bool {
+	if cmd == nil {
+		return false
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if cmdYields(c, want) {
+				return true
+			}
+		}
+		return false
+	}
+	return fmt.Sprintf("%T", msg) == fmt.Sprintf("%T", want)
+}
+
+// runFlourish feeds flourishTickMsg until the model latches flourishDone, and
+// returns the model plus the number of ticks it took. It fails if the flourish
+// does not end within a generous bound (it must be a fixed, small count).
+func runFlourish(t *testing.T, m *Model) (*Model, int) {
+	t.Helper()
+	for i := 1; i <= 64; i++ {
+		var cmd tea.Cmd
+		m, cmd = step(t, m, flourishTickMsg{})
+		if m.flourishDone {
+			// The terminal tick must not re-arm.
+			if cmdYields(cmd, flourishTickMsg{}) {
+				t.Fatal("the flourish scheduled another tick after completing")
+			}
+			return m, i
+		}
+		if !cmdYields(cmd, flourishTickMsg{}) {
+			t.Fatalf("flourish tick %d did not re-arm but flourishDone is still false", i)
+		}
+	}
+	t.Fatal("flourish never completed within 64 ticks — it is not bounded by a small fixed count")
+	return m, 0
+}
+
+func TestInitBatchIncludesAFlourishTick(t *testing.T) {
+	m := New(proto.Matched{Opener: "hi there"})
+	if !cmdYields(m.Init(), flourishTickMsg{}) {
+		t.Fatal("Init did not schedule the intro flourish tick")
+	}
+}
+
+func TestFlourishIsBoundedAndClears(t *testing.T) {
+	m := New(proto.Matched{Opener: "hi there"})
+	if m.flourishDone {
+		t.Fatal("a fresh surface should still be playing the flourish")
+	}
+
+	before := viewOf(m)
+	if !strings.Contains(before, "here we go") {
+		t.Fatalf("the flourish row is missing before completion:\n%s", before)
+	}
+	// The flourish row itself is inert copy — no ESC/CSI/OSC of its own (the
+	// input box below it legitimately carries styling, so scan the row, not the
+	// whole view).
+	assertNoTerminalControls(t, "flourish row", m.flourishRow())
+	for _, f := range flourishFrames {
+		assertNoTerminalControls(t, "flourish frame", f)
+	}
+
+	m, ticks := runFlourish(t, m)
+	if ticks != len(flourishFrames) {
+		t.Fatalf("flourish ended after %d ticks, want the fixed %d", ticks, len(flourishFrames))
+	}
+	if flourishInterval*time.Duration(len(flourishFrames)) >= time.Second {
+		t.Fatalf("flourish span %v is not well under ~1s", flourishInterval*time.Duration(len(flourishFrames)))
+	}
+
+	after := viewOf(m)
+	if strings.Contains(after, "here we go") {
+		t.Fatalf("the flourish row is still shown after completion:\n%s", after)
+	}
+
+	// A further stray tick is inert.
+	m2, cmd := step(t, m, flourishTickMsg{})
+	if cmd != nil {
+		t.Fatalf("a post-completion flourish tick produced a command %T, want nil", cmd())
+	}
+	if strings.Contains(viewOf(m2), "here we go") {
+		t.Fatal("a stray flourish tick brought the row back")
+	}
+}
+
+// TestFlourishReclaimsExactlyOneViewportRow drives a real pane size through the
+// model so relayout's `- m.flourishHeight()` term is actually exercised: the
+// flourish row sits above the header while playing, and when it clears the
+// history viewport grows by exactly one row (the reclaimed line) and by no more
+// on any later tick. Settled height equals the full four-region budget.
+func TestFlourishReclaimsExactlyOneViewportRow(t *testing.T) {
+	m := New(proto.Matched{Pseudonym: "kestrel", Opener: "the opener line"})
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	if m.flourishDone {
+		t.Fatal("precondition: the flourish should still be playing")
+	}
+
+	// While playing, the flourish row renders ABOVE the header line.
+	v := viewOf(m)
+	rowIdx := strings.Index(v, "here we go")
+	hdrIdx := strings.Index(v, "you're chatting with")
+	if rowIdx < 0 || hdrIdx < 0 {
+		t.Fatalf("flourish row (@%d) or header (@%d) missing from the playing view:\n%s", rowIdx, hdrIdx, v)
+	}
+	if rowIdx >= hdrIdx {
+		t.Fatalf("flourish row is not above the header (row @%d, header @%d):\n%s", rowIdx, hdrIdx, v)
+	}
+
+	playingVPH := m.vp.Height()
+
+	m, _ = runFlourish(t, m)
+
+	wantVPH := m.height - m.headerHeight() - m.controlsHeight() - inputHeight
+	if got := m.vp.Height(); got != playingVPH+1 {
+		t.Fatalf("viewport grew by %d rows when the flourish cleared, want exactly 1 (%d -> %d)", got-playingVPH, playingVPH, got)
+	}
+	if got := m.vp.Height(); got != wantVPH {
+		t.Fatalf("settled viewport height = %d, want height-header-controls-input = %d", got, wantVPH)
+	}
+
+	// No further layout change on a stray post-completion tick.
+	m2, _ := step(t, m, flourishTickMsg{})
+	if got := m2.vp.Height(); got != wantVPH {
+		t.Fatalf("a stray post-completion tick changed the viewport height: %d -> %d", wantVPH, got)
+	}
+}
+
+// TestFlourishSurvivesAMidFlightResize resizes the pane while the flourish is
+// still playing and confirms the row stays above the header at the new size and
+// the settled viewport height is exactly the four-region budget for the new
+// size — no double-counted flourish row, no missing reclaimed row.
+func TestFlourishSurvivesAMidFlightResize(t *testing.T) {
+	m := New(proto.Matched{Pseudonym: "kestrel", Opener: "opener"})
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	m, _ = step(t, m, flourishTickMsg{}) // one frame in, still playing
+	if m.flourishDone {
+		t.Fatal("precondition: the flourish should still be playing after one tick")
+	}
+
+	m, _ = step(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	if m.flourishDone {
+		t.Fatal("a resize must not end the flourish")
+	}
+	v := viewOf(m)
+	if strings.Index(v, "here we go") >= strings.Index(v, "you're chatting with") {
+		t.Fatalf("after a mid-flight resize the flourish row is no longer above the header:\n%s", v)
+	}
+
+	m, _ = runFlourish(t, m)
+
+	want := m.height - m.headerHeight() - m.controlsHeight() - inputHeight
+	if got := m.vp.Height(); got != want {
+		t.Fatalf("post-resize settled viewport height = %d, want %d (no double-count, no missing row)", got, want)
+	}
+	if strings.Contains(viewOf(m), "here we go") {
+		t.Fatal("flourish row still shown after completion following a mid-flight resize")
+	}
+}
+
+func TestTypingAndEnterWorkDuringTheFlourish(t *testing.T) {
+	type call struct{ id, text string }
+	var calls []call
+	m := New(proto.Matched{Opener: "hi there"},
+		WithSend(func(id, text string) { calls = append(calls, call{id, text}) }))
+
+	if m.flourishDone {
+		t.Fatal("precondition: the flourish should still be playing")
+	}
+
+	m = typeString(t, m, "mid spin")
+	m, _ = pressEnter(t, m)
+
+	last := m.history[len(m.history)-1]
+	if last.from != fromSelf || last.text != "mid spin" {
+		t.Fatalf("self line not appended during the flourish: %+v", last)
+	}
+	if len(calls) != 1 || calls[0].text != "mid spin" || calls[0].id != last.id {
+		t.Fatalf("WithSend not fired correctly during the flourish: %+v", calls)
+	}
+	if m.flourishDone {
+		t.Fatal("typing must not end the flourish early")
+	}
+}
+
+func TestPeerMsgDuringTheFlourishLandsInHistory(t *testing.T) {
+	m := New(proto.Matched{Opener: "hi there"})
+
+	m, _ = step(t, m, flourishTickMsg{}) // still playing
+	if m.flourishDone {
+		t.Fatal("precondition: the flourish should still be playing")
+	}
+	m, _ = step(t, m, PeerMsg{ClientMsgID: "peer-mid", Text: "hello from mid-spin"})
+
+	m, _ = runFlourish(t, m)
+
+	var found bool
+	for _, e := range m.history {
+		if e.from == fromPeer && e.id == "peer-mid" && e.text == "hello from mid-spin" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a peer line sent during the flourish was lost: %+v", m.history)
+	}
+	if !strings.Contains(viewOf(m), "hello from mid-spin") {
+		t.Fatalf("the mid-flourish peer line is not in the settled view:\n%s", viewOf(m))
 	}
 }
