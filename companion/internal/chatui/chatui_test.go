@@ -399,6 +399,60 @@ func TestLeaveRaisesIntentAndQuits(t *testing.T) {
 	}
 }
 
+// TestEscAlsoRaisesLeaveIntent: esc is the second leave binding (Epic 2 retro
+// F9) — a terminal with legacy flow control can swallow ctrl+q, so the primary
+// exit control needs a key the tty never intercepts.
+func TestEscAlsoRaisesLeaveIntent(t *testing.T) {
+	var got []Intent
+	m := New(proto.Matched{Opener: "hi there"}, WithNotify(func(i Intent) { got = append(got, i) }))
+
+	_, cmd := step(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+
+	if len(got) != 1 || got[0] != IntentLeave {
+		t.Fatalf("esc raised intents %v, want [leave]", got)
+	}
+	if cmd == nil {
+		t.Fatal("esc returned no command, want tea.Quit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("esc command produced %T, want tea.QuitMsg", cmd())
+	}
+}
+
+// TestLeaveKeyIsAdvertisedAsEsc: the always-visible controls bar names esc for
+// leave (F9) — the binding whose key a tty cannot eat.
+func TestLeaveKeyIsAdvertisedAsEsc(t *testing.T) {
+	m := New(proto.Matched{Opener: "hi there"})
+	controls := m.controlsText()
+	if !strings.Contains(controls, "esc my claude's back") {
+		t.Fatalf("controls bar does not advertise esc for leave: %q", controls)
+	}
+}
+
+// TestLogLineEmitsPrintlnWithoutChangingState: a chatui.LogLine from run.loop
+// prints above the frame via tea.Println and touches nothing else (Epic 2 retro
+// F6 — this is the Send-based replacement for a direct *tea.Program.Println).
+func TestLogLineEmitsPrintlnWithoutChangingState(t *testing.T) {
+	m := New(proto.Matched{Opener: "hi there"})
+	m = typeString(t, m, "half-typed")
+	before := len(m.history)
+
+	m2, cmd := step(t, m, LogLine{Text: "companion: block requested from the chat surface"})
+
+	if len(m2.history) != before {
+		t.Fatalf("LogLine changed history length %d -> %d", before, len(m2.history))
+	}
+	if m2.input.Value() != "half-typed" {
+		t.Fatalf("LogLine disturbed the input box: %q", m2.input.Value())
+	}
+	if cmd == nil {
+		t.Fatal("LogLine returned no command, want a tea.Println")
+	}
+	if _, ok := cmd().(tea.QuitMsg); ok {
+		t.Fatal("LogLine produced a QuitMsg")
+	}
+}
+
 func TestBlockAndReportRaiseIntentWithoutQuitting(t *testing.T) {
 	var got []Intent
 	m := New(proto.Matched{Opener: "hi there"}, WithNotify(func(i Intent) { got = append(got, i) }))

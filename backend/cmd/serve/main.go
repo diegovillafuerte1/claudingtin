@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/diegovillafuerte1/claudingtin/backend"
 	"github.com/diegovillafuerte1/claudingtin/backend/internal/hub"
 	"github.com/diegovillafuerte1/claudingtin/backend/internal/server"
 )
@@ -38,6 +39,16 @@ func main() {
 
 	hubCtx, stopHub := context.WithCancel(context.Background())
 	defer stopHub()
+
+	// Validate the embedded opener set before the hub goroutine starts. The hub
+	// calls backend.Openers() (which panics on a bad set) from inside its own
+	// goroutine, so without this a malformed openers.txt would surface as an
+	// unrecovered panic racing a listening socket rather than a clean startup
+	// failure (Epic 2 retro F8).
+	if _, err := backend.LoadOpeners(); err != nil {
+		logger.Error("opener set is invalid; refusing to start", "err", err.Error())
+		os.Exit(1)
+	}
 
 	h := hub.New()
 	go h.Run(hubCtx)

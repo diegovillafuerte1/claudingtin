@@ -20,6 +20,19 @@ func TestEmbeddedOpenersParse(t *testing.T) {
 	}
 }
 
+// TestLoadOpenersValidatesTheEmbeddedSet: LoadOpeners is the non-panicking form
+// backend serve's main uses to fail fast (Epic 2 retro F8). It must agree with
+// Openers() on the real embedded file and never panic.
+func TestLoadOpenersValidatesTheEmbeddedSet(t *testing.T) {
+	got, err := LoadOpeners()
+	if err != nil {
+		t.Fatalf("LoadOpeners on the embedded set: %v", err)
+	}
+	if want := Openers(); len(got) != len(want) {
+		t.Fatalf("LoadOpeners returned %d entries, Openers() has %d", len(got), len(want))
+	}
+}
+
 // TestOpenersReturnsCopy: a caller mutating the returned slice must not affect
 // the shared set handed to the next caller.
 func TestOpenersReturnsCopy(t *testing.T) {

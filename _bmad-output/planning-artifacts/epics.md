@@ -212,7 +212,7 @@ FR13: Epic 2 — text only, no media
 FR14: Epic 4 — outbound links stripped / inert
 FR15: Epic 2 — no chat content persisted; in-memory relay only
 FR16: Epic 2 — surface shows pseudonym, blurb, current-chat history, input, block/report/leave controls
-FR17: Epic 2 — typing indicators may show; no read receipts
+FR17: Epic 2 — no read receipts (delivered). Typing indicator is "may show" / optional and is NOT implemented in v1: no `typing` wire type, no indicator in the chat surface (spec-2-3 descopes it explicitly). Revisit only if a v1 typing indicator is ever decided in scope. See epic-2-retro-2026-09-07 finding F3.
 FR18: Epic 3 — connection-state indication in no-rejection language
 FR19: Epic 3 — every chat-end presented identically as "their Claude came back"
 FR20: Epic 3 — disconnect / end while busy → spinner + silent re-enqueue

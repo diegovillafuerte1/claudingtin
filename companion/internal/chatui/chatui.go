@@ -124,6 +124,15 @@ type OutboundMsg struct {
 	Text        string
 }
 
+// LogLine asks the surface to print one content-free operator line above the
+// live frame, via tea.Println, coordinated with the renderer. run.loop delivers
+// it with *tea.Program.Send — which is documented as a no-op once the program
+// has exited, so unlike a direct *tea.Program.Println call it can never wedge
+// run.loop during teardown (Epic 2 retrospective finding F6: a buffered
+// block/report/leave intent processed after Run returned used to block the loop
+// forever on Println).
+type LogLine struct{ Text string }
+
 // Option configures a Model at construction.
 type Option func(*Model)
 
@@ -169,7 +178,10 @@ func defaultKeymap() keymap {
 		send:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
 		block:  key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("ctrl+b", "block")),
 		report: key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "report")),
-		leave:  key.NewBinding(key.WithKeys("ctrl+q"), key.WithHelp("ctrl+q", "my claude's back")),
+		// esc is the advertised leave key; ctrl+q is kept as an alias but a
+		// terminal with legacy flow control (ixon) swallows it before the
+		// program sees it, so it cannot be the only binding (Epic 2 retro F9).
+		leave: key.NewBinding(key.WithKeys("esc", "ctrl+q"), key.WithHelp("esc", "my claude's back")),
 	}
 }
 
@@ -298,6 +310,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
+
+	case LogLine:
+		// A content-free operator breadcrumb from run.loop. tea.Println prints it
+		// above the live frame and is a no-op if the program is already quitting,
+		// so it is safe from any run.loop arm (F6).
+		return m, tea.Println(msg.Text)
 
 	case PeerMsg:
 		// Follow the newest line only if the reader was already at the bottom;

@@ -63,6 +63,15 @@ func parseOpeners(raw string) ([]string, error) {
 	return openers, nil
 }
 
+// LoadOpeners parses and validates the embedded opener set and returns the
+// entries or a descriptive error. It is the non-panicking form of Openers, for
+// backend serve's main to call at startup: a malformed set then fails with one
+// structured log line before anything is listening, instead of surfacing later
+// as an unrecovered panic from inside the hub goroutine (Epic 2 retro F8).
+func LoadOpeners() ([]string, error) {
+	return parseOpeners(openersRaw)
+}
+
 var (
 	openersOnce sync.Once
 	openersSet  []string
