@@ -10,9 +10,15 @@
 //   - inside another scriptable multiplexer (WezTerm, Zellij, Kitty with remote
 //     control, Windows Terminal): the equivalent adjacent pane via that tool's
 //     own CLI — see placement.go;
-//   - none of those, or every split attempt failed: the companion spawned
-//     detached with (transcript-path, "", "") without waiting, plus exactly one
-//     stdout line telling the user how to open a live view themselves;
+//   - none of those, but a terminal emulator is available and
+//     CLAUDINGTIN_NO_WINDOW is not set: the companion opened in a new OS
+//     terminal window (macOS Terminal, a probed Linux emulator, or
+//     `cmd /c start` on Windows) so it gets its own PTY and the first-run
+//     safety gate works — see windowterm.go;
+//   - none of those, every split attempt failed, or CLAUDINGTIN_NO_WINDOW is
+//     set: the companion spawned detached with (transcript-path, "", "")
+//     without waiting, plus exactly one stdout line telling the user how to
+//     open a live view themselves;
 //   - any precondition unmet (opt-out, malformed input, missing binary,
 //     session already launched, …): a silent no-op.
 //
@@ -34,6 +40,9 @@ import (
 const (
 	// disableEnvVar, when truthy, makes the launcher a no-op.
 	disableEnvVar = "CLAUDINGTIN_DISABLE"
+	// noWindowEnvVar, when truthy, forces the detached-spawn fallback instead
+	// of opening the companion in a new OS terminal window.
+	noWindowEnvVar = "CLAUDINGTIN_NO_WINDOW"
 	// lockPrefix names the per-session lock file: <lockPrefix><session id>.lock.
 	lockPrefix = "claudingtin-"
 )

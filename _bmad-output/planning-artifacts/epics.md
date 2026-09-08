@@ -28,7 +28,7 @@ FR2: Think-time boundaries are determined by the companion watching the Claude C
 FR3: Tool-call boundaries within one turn are treated as the same continuous burst, so a single user turn maps to at most one match. `[ASSUMPTION]`
 FR4: If a burst ends while the user is still queued and never matched, the plugin silently removes them from the queue with no error surfaced.
 FR5: The companion renders adjacent to the Claude session — automatically as a `tmux` split pane when inside tmux; otherwise the plugin prints a one-line instruction to open it in a split/pane/window the user controls. Inbound messages render in the companion's own pane; nothing is pushed into the Claude Code TUI.
-FR6: The plugin is a no-op when the user is not opted in, the companion can't start, or the backend is unreachable — it must never block, delay, or error the Claude Code session. Where no adjacent placement is possible (some IDE terminals), the companion still runs and the user places it manually. `[ASSUMPTION on placement fallback]`
+FR6: The plugin is a no-op when the user is not opted in, the companion can't start, or the backend is unreachable — it must never block, delay, or error the Claude Code session. Where no adjacent split pane is possible (a bare terminal, a VS Code / JetBrains integrated terminal), the plugin opens the companion in a new OS terminal window where a terminal application can be launched — a real PTY, so the first-run screen works. Where no window can be opened (a headless / API-only context, or no usable terminal emulator), it spawns the companion detached and prints the one-line manual-placement hint. (Epic 2 retro F10 / item 17 built the new-window fallback and resolved the earlier placement-fallback assumption.)
 
 **F2 — FIFO matching and queue**
 
@@ -200,7 +200,7 @@ FR1: Epic 1 — companion process launched by the plugin on SessionStart
 FR2: Epic 1 — transcript-watch determines think-time boundaries; ready/busy to backend
 FR3: Epic 1 — tool-call boundaries within a turn = one burst = at most one match
 FR4: Epic 1 — burst ends while still queued → silent queue removal
-FR5: Epic 1 — pane placement (tmux auto-split / manual elsewhere)
+FR5: Epic 1 — pane placement (tmux / mux split, new-window fallback, one-line hint last)
 FR6: Epic 1 — plugin is a fail-open no-op when not opted in / companion can't start / backend unreachable
 FR7: Epic 2 — strict FIFO pairing, no scoring
 FR8: Epic 4 — no match against block list or active cooldown
@@ -459,7 +459,7 @@ So that I can see it without arranging windows myself.
 
 **Given** the session is not inside tmux
 **When** the companion starts
-**Then** the plugin prints exactly one line instructing the user how to open/focus the companion pane, and nothing blocks.
+**Then** it is placed in an adjacent pane by another scriptable multiplexer, or — where a terminal emulator is available — opened in a new OS window; only with none of those does the plugin print exactly one line instructing the user how to open/focus the companion pane. Nothing blocks in any case.
 
 **Given** either placement
 **When** inbound messages arrive

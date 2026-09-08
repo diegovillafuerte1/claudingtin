@@ -178,6 +178,7 @@ func TestLaunchPlacementFailureFallsBackToSpawn(t *testing.T) {
 	const stdinJSON = `{"session_id":"plc2","transcript_path":"/tmp/t.jsonl","hook_event_name":"SessionStart"}`
 
 	fakePluginRoot(t)
+	stubNoWindow(t)
 	restore := placePane
 	t.Cleanup(func() { placePane = restore })
 	placePane = func(_ func(string) string, _ string, _ []string) bool { return false }

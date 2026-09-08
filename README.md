@@ -9,7 +9,7 @@ This repository is a Go workspace (`go.work`) over four modules — `proto`, `ba
 | `proto` | `./proto` | `github.com/diegovillafuerte1/claudingtin/proto` | — (stdlib only) | Wire contract: the `{type, v, ...payload}` envelope, `PROTOCOL_VERSION`, one struct + `snake_case` discriminator per v1 message, and `Encode`/`Decode`. |
 | `backend` | `./backend` | `github.com/diegovillafuerte1/claudingtin/backend` | `proto` | Server: `cmd/serve` (websocket + `GET /status`), `cmd/ban`, `cmd/reports`. Minimal in Epic 1. |
 | `companion` | `./companion` | `github.com/diegovillafuerte1/claudingtin/companion` | `proto`, `fsnotify`, `coder/websocket` | Local TUI that tails the Claude Code transcript and speaks `ready`/`busy` over the websocket, behind a local first-run 18+/safety gate. Transcript turn-boundary parser + fsnotify tailer live in `internal/transcript`; the format it targets is pinned in [`docs/transcript-format.md`](docs/transcript-format.md). |
-| `plugin` | `./plugin` | `github.com/diegovillafuerte1/claudingtin/plugin` | — (execs the companion by path) | `cmd/session-start` fail-open launcher plus the `hooks/session-start.sh` arch-dispatch wrapper, registered by `.claude-plugin/plugin.json` → `hooks/hooks.json` (`SessionStart`, `matcher: startup\|resume`). Inside tmux — or WezTerm / Zellij / Kitty / Windows Terminal — the launcher drops the companion into an adjacent split pane beside the Claude session; with none of those it spawns it detached and prints one line on how to open a live view. Committed cross-built binaries — the per-platform `session-start` launcher beside the pinned `companion` — live under `bin/<os>-<arch>/`. |
+| `plugin` | `./plugin` | `github.com/diegovillafuerte1/claudingtin/plugin` | — (execs the companion by path) | `cmd/session-start` fail-open launcher plus the `hooks/session-start.sh` arch-dispatch wrapper, registered by `.claude-plugin/plugin.json` → `hooks/hooks.json` (`SessionStart`, `matcher: startup\|resume`). Inside tmux — or WezTerm / Zellij / Kitty / Windows Terminal — the launcher drops the companion into an adjacent split pane beside the Claude session; in a bare terminal or an editor-integrated terminal it opens the companion in a new OS window (real PTY, so the first-run screen works); only when no window can be opened does it spawn detached and print one line on how to open a live view (`CLAUDINGTIN_NO_WINDOW` forces that fallback). Committed cross-built binaries — the per-platform `session-start` launcher beside the pinned `companion` — live under `bin/<os>-<arch>/`. |
 
 ## Backend
 
@@ -251,9 +251,16 @@ does the equivalent through that tool's own CLI — WezTerm (`$WEZTERM_PANE`),
 Zellij (`$ZELLIJ`), Kitty with remote control on (`$KITTY_LISTEN_ON`), or
 Windows Terminal (`$WT_SESSION`). With none of those (a bare terminal, a
 VS Code / JetBrains integrated terminal), or if every split attempt fails, it
-falls back to spawning that same command detached without waiting and prints
-exactly one line telling you how to open a split and run it yourself. Set
-`CLAUDINGTIN_DISABLE` to `1`/`true`/`yes`/`on` to disable the launch entirely.
+opens the companion in a new OS window — macOS Terminal via a self-deleting
+`.command` script, a probed Linux terminal emulator, or `cmd /c start` on
+Windows — so it still gets a real PTY and the first-run 18+/safety screen
+works. Only when no window can be opened at all (no usable terminal emulator, or
+a headless / API-only context) does it spawn that same command detached without
+waiting and print exactly one line telling you how to open a split and run it
+yourself. Two opt-out knobs take a truthy value — `1`, `true`, `yes`, or `on`
+(case-insensitive): `CLAUDINGTIN_NO_WINDOW` forces the detached-spawn fallback
+instead of a new window, and `CLAUDINGTIN_DISABLE` skips the launch entirely.
+`CLAUDINGTIN_DISABLE` is checked first, so it wins if both are set.
 Every other path — opt-out, malformed input, missing or unusable binary, spawn
 error, even a panic — still exits `0` (that one-line fallback hint is the only
 thing ever written to stdout), so a broken or absent companion never blocks the

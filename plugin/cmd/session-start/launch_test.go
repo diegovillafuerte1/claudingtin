@@ -47,6 +47,17 @@ func fakePluginRoot(t *testing.T) string {
 	return root
 }
 
+// stubNoWindow points openWindow at a func that always declines, so a test that
+// exercises the detached-spawn fallback does not depend on the host's terminal
+// emulators (and never opens a real window on macOS). The override is undone on
+// cleanup, mirroring the placePane restore idiom.
+func stubNoWindow(t *testing.T) {
+	t.Helper()
+	prev := openWindow
+	openWindow = func(func(string) string, string, string, string, []string) bool { return false }
+	t.Cleanup(func() { openWindow = prev })
+}
+
 func TestParse(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -289,6 +300,7 @@ func TestLaunch(t *testing.T) {
 
 	t.Run("normal launch (no tmux) spawns detached and prints one hint line", func(t *testing.T) {
 		fakePluginRoot(t)
+		stubNoWindow(t)
 		rec := &recordingSpawn{}
 		tmx := &recordingTmux{}
 		var out bytes.Buffer
@@ -371,6 +383,7 @@ func TestLaunch(t *testing.T) {
 
 	t.Run("tmux split failure falls back to the detached spawn + hint", func(t *testing.T) {
 		fakePluginRoot(t)
+		stubNoWindow(t)
 		rec := &recordingSpawn{}
 		tmx := &recordingTmux{errRet: exec.ErrNotFound}
 		var out bytes.Buffer
@@ -416,6 +429,7 @@ func TestLaunch(t *testing.T) {
 
 	t.Run("opt-out falsey proceeds", func(t *testing.T) {
 		fakePluginRoot(t)
+		stubNoWindow(t)
 		rec := &recordingSpawn{}
 		tmx := &recordingTmux{}
 		var out bytes.Buffer
@@ -569,6 +583,7 @@ func TestLaunch(t *testing.T) {
 
 	t.Run("spawn error is returned, no stdout, lock kept", func(t *testing.T) {
 		fakePluginRoot(t)
+		stubNoWindow(t)
 		rec := &recordingSpawn{errRet: exec.ErrNotFound}
 		tmx := &recordingTmux{}
 		var out bytes.Buffer
@@ -698,8 +713,9 @@ func TestLauncherEndToEndExitsZero(t *testing.T) {
 			cmd := exec.Command("sh", wrapper)
 			cmd.Env = append(os.Environ(),
 				"CLAUDE_PLUGIN_ROOT="+root,
-				"TMPDIR="+t.TempDir(), // isolate the per-session lock file
-				"TMUX=",               // deterministically the no-tmux (manual) path
+				"TMPDIR="+t.TempDir(),     // isolate the per-session lock file
+				"TMUX=",                   // deterministically the no-tmux (manual) path
+				"CLAUDINGTIN_NO_WINDOW=1", // no real terminal window during tests
 			)
 			cmd.Stdin = strings.NewReader(tc.stdin)
 			var stdout, stderr bytes.Buffer
@@ -758,7 +774,8 @@ func TestLauncherEndToEndNoTmuxPrintsHint(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"CLAUDE_PLUGIN_ROOT="+root,
 		"TMPDIR="+t.TempDir(),
-		"TMUX=", // no tmux: the manual path with the one-line hint
+		"TMUX=",                   // no tmux: the manual path with the one-line hint
+		"CLAUDINGTIN_NO_WINDOW=1", // no real terminal window during tests
 	)
 	cmd.Stdin = strings.NewReader(`{"session_id":"e2ehint","transcript_path":"/tmp/t.jsonl"}`)
 	var stdout, stderr bytes.Buffer

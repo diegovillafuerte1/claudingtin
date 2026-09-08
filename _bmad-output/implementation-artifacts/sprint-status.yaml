@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-01-2026 02:10
-last_updated: 09-08-2026 01:00
+last_updated: 09-08-2026 02:30
 project: claudingtin
 project_key: NOKEY
 tracking_system: file-system
@@ -118,10 +118,14 @@ action_items:
   - id: "epic-1-retro-item-4-f7-product-decision-give-non-tmux-users"
     epic: 1
     action: "F7: Product decision — give non-tmux users a visible first-run path (companion-menu
-      accept, a user-visible cue, or TTY-aware placement). Likely an Epic 2/3 story."
+      accept, a user-visible cue, or TTY-aware placement). Likely an Epic 2/3 story.
+      DONE 2026-09-08: superseded by Epic 2 retro F10 / item 17 — the new-OS-window
+      placement fallback (plugin/cmd/session-start/windowterm.go) hands the companion
+      a real PTY in a bare terminal / editor-integrated terminal, so safety.Gate shows
+      the 18+/safety screen instead of reading EOF. Retired per that spec."
     owner: "Diego"
-    status: open
-    ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/spec-epic-2-retro-item-17-windowed-placement-fallback.md"
   - id: "epic-1-retro-item-5-f8-before-epic-2-one-real-end-to-end-run"
     epic: 1
     action: "F8: Before Epic 2 — one real end-to-end run: build and populate plugin/bin/<os>-<arch>/
@@ -231,7 +235,11 @@ action_items:
       an env-detected placement strategy registry (tmux #1, then wezterm/kitty/zellij/iterm2/wt)
       plus a 'new OS window' fallback that hands the companion a real PTY; this also
       closes Epic-1 F7 (non-tmux first-run gate reads EOF and goes inert). Retire
-      epic-1-retro-item-4."
+      epic-1-retro-item-4. DONE 2026-09-08: muxStrategies registry (placement.go)
+      landed first; new-OS-window fallback (windowterm.go — macOS/Linux/Windows,
+      CLAUDINGTIN_NO_WINDOW override) landed second per spec-epic-2-retro-item-17-windowed-placement-fallback.md.
+      iTerm2 in-place split intentionally not built (AppleScript → macOS Automation
+      TCC prompt); the new-window path serves iTerm2 users. epic-1-retro-item-4 retired."
     owner: "Diego"
-    status: in-progress
-    ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/spec-epic-2-retro-item-17-windowed-placement-fallback.md"
