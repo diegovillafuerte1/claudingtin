@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-01-2026 02:10
-last_updated: 09-07-2026 23:59
+last_updated: 09-08-2026 00:47
 project: claudingtin
 project_key: NOKEY
 tracking_system: file-system
@@ -162,7 +162,7 @@ action_items:
       or drain <-chatDone before any buffered intent). Add a run_test.go case with
       a blocking Println fake. Reachable ~50% per keyboard leave; also block/report."
     owner: "Diego"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
   - id: "epic-2-retro-item-10-f4-f5-before-epic-3-adds-session_ended-r"
     epic: 2
@@ -187,7 +187,7 @@ action_items:
     action: "F3: Reconcile epics.md FR Coverage Map — qualify 'FR17: Epic 2' as 'read-receipts-never
       delivered; optional typing indicator not implemented, no v1 commitment'."
     owner: "Diego"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
   - id: "epic-2-retro-item-13-f2-record-review-driven-hardening-of-a-f"
     epic: 2
@@ -195,7 +195,7 @@ action_items:
       review_loop_iteration or add a Spec Change Log line) — starting with spec-2-3
       inert()."
     owner: "Diego"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
   - id: "epic-2-retro-item-14-f8-eager-validate-the-opener-set-call-ba"
     epic: 2
@@ -203,14 +203,14 @@ action_items:
       and log.Fatal before 'go h.Run(...)' so a malformed openers.txt is a structured
       startup fatal, not an unrecovered goroutine panic."
     owner: "Diego"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
   - id: "epic-2-retro-item-15-f9-add-a-second-leave-binding-esc-in-cha"
     epic: 2
     action: "F9: Add a second 'leave' binding (esc) in chatui, or document the ctrl+q
       terminal flow-control caveat."
     owner: "Diego"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
   - id: "epic-2-retro-item-16-evidence-gap-confirm-whether-per-story-r"
     epic: 2
@@ -228,5 +228,5 @@ action_items:
       closes Epic-1 F7 (non-tmux first-run gate reads EOF and goes inert). Retire
       epic-1-retro-item-4."
     owner: "Diego"
-    status: open
+    status: in-progress
     ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
