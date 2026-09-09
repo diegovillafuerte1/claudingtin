@@ -4,10 +4,16 @@
 // out, watches for the five inbound frames that matter (queued, matched,
 // chat_msg, please_update, session_ended) — queued is surfaced on Queued() for
 // run.loop to raise the searching spinner, matched on Matched() to open the
-// chat surface, chat_msg on ChatMsgs() to render as a peer line, and the last
-// two end Run — and reconnects with an exponentially backed-off, fully jittered
-// delay after any drop — forever, until the context is cancelled or the server
-// asks the client to update.
+// chat surface, chat_msg on ChatMsgs() to render as a peer line, and
+// session_ended on SessionEnded() as a calm chat-end — and reconnects with an
+// exponentially backed-off, fully jittered delay after any drop — forever,
+// until the context is cancelled or the server asks the client to update.
+//
+// session_ended is a chat-end, not a connection-end: it is surfaced and serving
+// continues, because a peer merely left and the socket is still ours. It ends
+// Run (as ResultSessionEnded) only when the server also closes the socket
+// within sessionEndedCloseGrace of the frame — a connection takeover or a
+// server shutdown. please_update is the one frame that ends Run unconditionally.
 //
 // It speaks nothing on the wire that is not a proto message, mirrors the
 // backend's framing (text frames, proto.Encode/Decode, a normal close on a
@@ -35,6 +41,13 @@ var (
 	backoffCap        = 30 * time.Second
 	dialTimeout       = 10 * time.Second
 	frameWriteTimeout = 5 * time.Second
+	// sessionEndedCloseGrace bounds how soon after a session_ended frame a
+	// socket close still counts as "the server ended this connection" (a
+	// takeover or a shutdown) rather than an unrelated later drop. The backend
+	// writes session_ended and closes synchronously on that path, so a small
+	// window is enough; a network blip seconds after a peer left reconnects
+	// normally instead.
+	sessionEndedCloseGrace = 2 * time.Second
 )
 
 // Result is how Run ended.
@@ -46,7 +59,10 @@ const (
 	// ResultPleaseUpdate: the server sent please_update. Run stops retrying;
 	// the caller keeps the process alive so the user can read the notice.
 	ResultPleaseUpdate
-	// ResultSessionEnded: another connection for this account key took over.
+	// ResultSessionEnded: the server closed the socket right after a
+	// session_ended frame — another connection for this account key took over,
+	// or the server is shutting down. A session_ended whose socket stays open
+	// is a peer leaving a chat and does not end Run.
 	ResultSessionEnded
 )
 
@@ -85,10 +101,11 @@ type Client struct {
 	url        string
 	accountKey string
 
-	events  chan Event
-	queued  chan proto.Queued
-	matched chan proto.Matched
-	chatMsg chan proto.ChatMsg
+	events       chan Event
+	queued       chan proto.Queued
+	matched      chan proto.Matched
+	chatMsg      chan proto.ChatMsg
+	sessionEnded chan proto.SessionEnded
 
 	mu   sync.Mutex
 	conn *websocket.Conn
@@ -99,12 +116,13 @@ type Client struct {
 // New returns a Client that will dial cfg.URL.
 func New(cfg Config) *Client {
 	return &Client{
-		url:        cfg.URL,
-		accountKey: cfg.AccountKey,
-		events:     make(chan Event, 8),
-		queued:     make(chan proto.Queued, 1),
-		matched:    make(chan proto.Matched, 1),
-		chatMsg:    make(chan proto.ChatMsg, 64),
+		url:          cfg.URL,
+		accountKey:   cfg.AccountKey,
+		events:       make(chan Event, 8),
+		queued:       make(chan proto.Queued, 1),
+		matched:      make(chan proto.Matched, 1),
+		chatMsg:      make(chan proto.ChatMsg, 64),
+		sessionEnded: make(chan proto.SessionEnded, 1),
 	}
 }
 
@@ -142,6 +160,17 @@ func (c *Client) Matched() <-chan proto.Matched { return c.matched }
 // line that arrives while the buffer is full is dropped. v1 has no ack, so
 // drop-on-full is acceptable.
 func (c *Client) ChatMsgs() <-chan proto.ChatMsg { return c.chatMsg }
+
+// SessionEnded delivers the inbound proto.SessionEnded frame to the caller. It
+// is buffered by one and never closed; run.loop drains it to show the calm
+// "their Claude came back" state and route the pane. session_ended is not a
+// terminal frame here — a peer left a chat, the socket is still ours, and Run
+// keeps serving so the session can be re-matched. The reader never blocks on
+// it: the serve goroutine's send is non-blocking, so a duplicate frame that
+// arrives while the buffer is full is dropped (run.loop's routing is
+// idempotent). Run still ends with ResultSessionEnded when the server closes
+// the socket within sessionEndedCloseGrace of this frame (takeover / shutdown).
+func (c *Client) SessionEnded() <-chan proto.SessionEnded { return c.sessionEnded }
 
 func (c *Client) emit(ctx context.Context, k EventKind) {
 	select {
@@ -270,23 +299,49 @@ const (
 // serve reads frames on a dedicated goroutine (so an outbound write and an
 // inbound session_ended can never deadlock, the same shape as the backend's
 // serveConn) until the context is cancelled, a read fails, or a terminal
-// inbound frame arrives. A proto.Queued / proto.Matched / proto.ChatMsg is
-// handed to the caller on its channel and serving continues; every other
-// non-terminal inbound frame is discarded.
+// inbound frame arrives. A proto.Queued / proto.Matched / proto.ChatMsg /
+// proto.SessionEnded is handed to the caller on its channel and serving
+// continues; every other non-terminal inbound frame is discarded.
+//
+// session_ended is surfaced but not terminal: a peer left a chat, the socket
+// is still ours. It only ends serve (as serveSessionEnded) when a read error
+// follows within sessionEndedCloseGrace — the server closed the socket right
+// after the frame, i.e. a takeover or a shutdown. A later unrelated drop is an
+// ordinary serveDropped and reconnects; a fresh queued/matched clears the arm.
 func (c *Client) serve(ctx context.Context, conn *websocket.Conn) serveResult {
 	readErr := make(chan struct{}, 1)
 	terminal := make(chan serveResult, 1)
 
+	// Captured once here so the read goroutine — which can outlive serve's
+	// return, unblocking from conn.Read only after ctx is cancelled — never
+	// races a test mutating the package var during teardown.
+	grace := sessionEndedCloseGrace
+
 	go func() {
+		// endedAt is set when a session_ended is surfaced and arms a window in
+		// which a following socket close is read as "the server ended this
+		// connection" (takeover / shutdown) rather than an ordinary drop. Any
+		// later frame — decodable or not — proves the socket still live and
+		// disarms it; a fresh session_ended re-arms.
+		var endedAt time.Time
 		for {
 			_, data, err := conn.Read(ctx)
 			if err != nil {
+				if ctx.Err() == nil && !endedAt.IsZero() && time.Since(endedAt) < grace {
+					// The server closed the socket right after a session_ended:
+					// a takeover or a shutdown. End Run, do not reconnect. (A
+					// ctx cancellation is a clean shutdown and takes the
+					// serveContextDone path instead.)
+					terminal <- serveSessionEnded
+					return
+				}
 				select {
 				case readErr <- struct{}{}:
 				default:
 				}
 				return
 			}
+			endedAt = time.Time{}
 			msg, derr := proto.Decode(data)
 			if derr != nil {
 				continue // undecodable frame — discard
@@ -325,8 +380,14 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn) serveResult {
 				terminal <- servePleaseUpdate
 				return
 			case proto.SessionEnded:
-				terminal <- serveSessionEnded
-				return
+				// Not terminal on its own: surface it and keep serving. If the
+				// server closes the socket next (within the grace), the read
+				// error above turns this into serveSessionEnded.
+				endedAt = time.Now()
+				select {
+				case c.sessionEnded <- m:
+				default:
+				}
 			default:
 				// every other v1 frame is ignored in this epic
 			}

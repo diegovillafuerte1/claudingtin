@@ -307,16 +307,13 @@ func TestRunFullAcceptWritesAck(t *testing.T) {
 			return
 		}
 		defer c.CloseNow()
-		// Send session_ended straight away, then keep draining so the client's
-		// read pump stays healthy until it acts on it — mirrors the run package's
-		// own e2e recorder.
+		// Send session_ended and close the socket right after: that pairing is
+		// a takeover / shutdown, the one session_ended shape that still exits
+		// run() cleanly (a socket-open session_ended is a peer leaving and
+		// keeps the companion running).
 		b, _ := proto.Encode(proto.SessionEnded{})
 		_ = c.Write(r.Context(), websocket.MessageText, b)
-		for {
-			if _, _, err := c.Read(r.Context()); err != nil {
-				return
-			}
-		}
+		_ = c.Close(websocket.StatusNormalClosure, "")
 	}))
 	defer ts.Close()
 

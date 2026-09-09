@@ -38,6 +38,13 @@ const (
 	// no nagging. Appended last on purpose — the earlier constants must keep
 	// their values.
 	PhaseInert
+	// PhaseClaudeBack: a matched chat just ended — the other person's Claude
+	// came back. The remaining user sees this same calm line for every cause
+	// (peer left, model returned, disconnect, block, report): a guilt-free
+	// "catch you later", never a hint that they were left. Shown when the
+	// user's own model is already back; still mid-think-time, the pane returns
+	// to the searching spinner instead. Appended last — earlier values unchanged.
+	PhaseClaudeBack
 )
 
 // line is the copy for a phase. Kept deliberately short and unpolished.
@@ -55,6 +62,8 @@ func line(p Phase) string {
 		return "this companion is out of date — grab the latest build to keep going"
 	case PhaseInert:
 		return "nothing's connected — you can turn this on whenever you like"
+	case PhaseClaudeBack:
+		return "looks like their claude's back — catch you later"
 	default:
 		return "…"
 	}
