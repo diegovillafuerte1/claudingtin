@@ -46,6 +46,8 @@ type readyCmd struct{ s *Session }
 
 type busyCmd struct{ s *Session }
 
+type leaveCmd struct{ s *Session }
+
 type chatMsgCmd struct {
 	s   *Session
 	msg proto.ChatMsg
@@ -56,6 +58,7 @@ func (unregisterCmd) isCommand() {}
 func (countCmd) isCommand()      {}
 func (readyCmd) isCommand()      {}
 func (busyCmd) isCommand()       {}
+func (leaveCmd) isCommand()      {}
 func (chatMsgCmd) isCommand()    {}
 
 // maxScan bounds how far past the queue head the pairing loop looks for an
@@ -108,17 +111,20 @@ func (h *Hub) Run(ctx context.Context) {
 			switch cmd := c.(type) {
 			case registerCmd:
 				// A second hello for a live key takes over: the prior session is
-				// displaced and told to end. Closing evict is the only thing the
-				// hub goroutine does here — the old handler goroutine sends
-				// session_ended and closes the socket.
+				// displaced and told to end.
 				if prev, ok := sessions[cmd.s.Key]; ok && prev != cmd.s {
-					close(prev.Evict)
-					// Evict the displaced session from the queue / pairing now,
-					// not when its handler eventually fires unregisterCmd — until
-					// then it could still be matched with a third session. The
-					// later unregisterCmd{prev} cleanup then just no-ops.
+					// Tear the displaced session out of the queue and any pairing
+					// BEFORE closing its evict channel, so the pairing is already
+					// gone by the time the victim's handler is signalled.
+					// teardownPair — the sole cause-agnostic session_ended
+					// emission point — notifies prev's peer here; the victim
+					// itself is told exactly once, by the server Evict case.
+					// Doing the teardown first keeps "pairing deleted before
+					// session_ended" true for takeover as well, and lets the
+					// later unregisterCmd{prev} cleanup simply no-op.
 					p.removeFromQueue(prev)
 					p.teardownPair(prev)
+					close(prev.Evict)
 					// Re-drain: a pair that only becomes formable once prev is
 					// gone should form now. This is the Epic-4 eligibility seam —
 					// with a narrower predicate a departing head can unblock a
@@ -156,6 +162,19 @@ func (h *Hub) Run(ctx context.Context) {
 			case busyCmd:
 				// Leaving while queued is silent; leaving while paired tears the
 				// pairing down and notifies the peer. A session is never both.
+				p.removeFromQueue(cmd.s)
+				p.teardownPair(cmd.s)
+				// Re-drain in case the departure unblocks a waiting pair. This is
+				// the Epic-4 eligibility seam — under a narrower predicate a
+				// blocking head leaving can free the sessions behind it.
+				p.drainQueue(eligible)
+			case leaveCmd:
+				// A client leave is the backend twin of busy: leaving while
+				// queued is silent, leaving while paired routes teardown through
+				// teardownPair — the sole cause-agnostic session_ended emission
+				// point — so the peer's frame is byte-identical to every other
+				// cause. A session is never both queued and paired. Story 3.5
+				// owns whether the leaver is re-enqueued; here it is not.
 				p.removeFromQueue(cmd.s)
 				p.teardownPair(cmd.s)
 				// Re-drain in case the departure unblocks a waiting pair. This is
@@ -219,9 +238,16 @@ func (p *pairingState) removeFromQueue(s *Session) {
 	}
 }
 
-// teardownPair ends s's pairing if it has one: both directions are deleted from
-// the table and the surviving peer receives a bare session_ended. Neither peer
-// is re-enqueued (Epic 3 owns re-enqueue). A no-op if s is not paired.
+// teardownPair is THE single cause-agnostic emission point for the peer-facing
+// session_ended. It ends s's pairing if it has one: both directions are deleted
+// from the table first, then the surviving peer receives exactly one bare
+// proto.SessionEnded, byte-identical for every cause that routes here (peer busy
+// / model-return, peer leave, peer disconnect, connection takeover, and — in
+// later epics — ban and reconnect-grace expiry). Because the pairing entry is
+// gone before the frame is delivered, session_ended is the last frame the peer
+// receives for that session and no further chat_msg can be relayed to it.
+// Neither peer is re-enqueued (Story 3.5 owns re-enqueue). A no-op if s is not
+// paired — which is what makes a leave or busy while queued or idle silent.
 func (p *pairingState) teardownPair(s *Session) {
 	peer, ok := p.pairings[s]
 	if !ok {
@@ -350,6 +376,14 @@ func (h *Hub) Ready(s *Session) {
 // its pairing and sends the surviving peer a bare session_ended if it is paired.
 func (h *Hub) Busy(s *Session) {
 	h.send(busyCmd{s: s})
+}
+
+// Leave tears down s's pairing through the same teardownPair path as Busy — the
+// surviving peer gets a bare session_ended byte-identical to the busy case — or
+// is a silent no-op if s is queued or idle. The leaver is never notified and
+// never re-enqueued (Story 3.5 owns re-enqueue).
+func (h *Hub) Leave(s *Session) {
+	h.send(leaveCmd{s: s})
 }
 
 // Relay delivers msg to s's paired peer only, never back to s; it is a no-op if

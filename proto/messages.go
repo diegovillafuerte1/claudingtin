@@ -129,8 +129,15 @@ type Matched struct {
 // TypeSessionEnded is the discriminator for SessionEnded.
 const TypeSessionEnded = "session_ended"
 
-// SessionEnded announces the matched session is over. Unified reason semantics
-// land in a later epic.
+// SessionEnded announces the matched session is over. It is cause-agnostic and
+// payload-free by contract: it carries no reason, no session_id, no timestamp,
+// and no field of any kind, so its wire form — {"type":"session_ended","v":1} —
+// is byte-identical for every way a session can end (peer model-return / busy,
+// peer leave, peer disconnect, connection takeover, and — in later epics — ban
+// and reconnect-grace expiry). Every backend-side end routes its peer
+// notification through the one hub teardownPair emission point; the taken-over
+// connection itself is told by exactly one path in the connection handler. This
+// type stays struct{} — there is no versioned variant that adds a cause.
 type SessionEnded struct{}
 
 // TypeBlocklist is the discriminator for Blocklist.

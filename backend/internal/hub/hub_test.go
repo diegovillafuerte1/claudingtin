@@ -559,6 +559,194 @@ func TestBusyWhilePairedTearsDownAndNotifiesPeer(t *testing.T) {
 	expectNoOutbound(t, b) // and is not re-enqueued
 }
 
+func TestLeaveWhilePairedTearsDownAndNotifiesPeer(t *testing.T) {
+	h, stop := startHub(t)
+	defer stop()
+
+	a, b := newSession("a"), newSession("b")
+	h.Register(a)
+	h.Register(b)
+	h.Ready(a)
+	h.Ready(b)
+	_ = matchedFrame(t, a)
+	_ = matchedFrame(t, b)
+
+	h.Leave(a)
+
+	if _, ok := recvOutbound(t, b).(proto.SessionEnded); !ok {
+		t.Fatal("B: expected a bare session_ended after A left")
+	}
+	expectNoOutbound(t, a) // the leaver hears nothing
+	expectNoOutbound(t, b) // and is not re-enqueued
+
+	// Both p.pairings directions are gone: a chat line from B now finds no
+	// pairing and is dropped, and B is freely re-matchable with a fresh peer.
+	h.Relay(b, proto.ChatMsg{ClientMsgID: "x", Text: "still there?"})
+	expectNoOutbound(t, b)
+
+	c := newSession("c")
+	h.Register(c)
+	h.Ready(c)
+	h.Ready(b)
+	if mb, mc := matchedFrame(t, b), matchedFrame(t, c); mb.SessionID == "" || mb.SessionID != mc.SessionID {
+		t.Fatalf("B not cleanly unpaired after leave: %q vs %q", mb.SessionID, mc.SessionID)
+	}
+}
+
+// TestLeaveMatchesBusyFrameForPeer proves the peer-facing frame is the exact
+// same value for leave and for busy — both are proto.SessionEnded{} out of the
+// one teardownPair emission point.
+func TestLeaveMatchesBusyFrameForPeer(t *testing.T) {
+	h, stop := startHub(t)
+	defer stop()
+
+	pairAndEnd := func(end func(h *Hub, s *Session)) any {
+		a, b := newSession("a"), newSession("b")
+		h.Register(a)
+		h.Register(b)
+		h.Ready(a)
+		h.Ready(b)
+		_ = matchedFrame(t, a)
+		_ = matchedFrame(t, b)
+		end(h, a)
+		return recvOutbound(t, b)
+	}
+
+	viaBusy := pairAndEnd((*Hub).Busy)
+	viaLeave := pairAndEnd((*Hub).Leave)
+
+	if _, ok := viaBusy.(proto.SessionEnded); !ok {
+		t.Fatalf("busy: peer frame = %#v, want proto.SessionEnded{}", viaBusy)
+	}
+	if viaLeave != viaBusy {
+		t.Fatalf("leave peer frame %#v differs from busy peer frame %#v", viaLeave, viaBusy)
+	}
+}
+
+func TestLeaveWhileUnpairedIsSilentNoOp(t *testing.T) {
+	h, stop := startHub(t)
+	defer stop()
+
+	// Idle (never readied): silent no-op, no panic.
+	a := newSession("a")
+	h.Register(a)
+	h.Leave(a)
+	expectNoOutbound(t, a)
+
+	// Queued: leaving the queue is silent, and it really leaves.
+	b, c := newSession("b"), newSession("c")
+	h.Register(b)
+	h.Ready(b)
+	if _, ok := recvOutbound(t, b).(proto.Queued); !ok {
+		t.Fatal("B: expected queued")
+	}
+	h.Leave(b)
+	expectNoOutbound(t, b)
+
+	h.Register(c)
+	h.Ready(c)
+	if _, ok := recvOutbound(t, c).(proto.Queued); !ok {
+		t.Fatal("C: expected queued (B must have left the queue)")
+	}
+	expectNoOutbound(t, b)
+}
+
+// TestTakeoverBranchTearsDownPairingBeforeEvict covers the reordered takeover
+// branch: the displaced session's peer still gets exactly one bare session_ended,
+// and the pairing is already gone by the time anything downstream of the branch
+// (its Evict close, the later stale Unregister) runs.
+func TestTakeoverBranchTearsDownPairingBeforeEvict(t *testing.T) {
+	h, stop := startHub(t)
+	defer stop()
+
+	// prev (key "k") is paired with peer.
+	prev := newSession("k")
+	peer := newSession("a")
+	h.Register(prev)
+	h.Register(peer)
+	h.Ready(prev)
+	h.Ready(peer)
+	_ = matchedFrame(t, prev)
+	_ = matchedFrame(t, peer)
+
+	// A newer connection for "k" takes over.
+	next := newSession("k")
+	h.Register(next)
+
+	// prev is signalled to end.
+	select {
+	case <-prev.Evict:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prev.Evict was not closed on takeover")
+	}
+	// The peer of the torn-down pairing gets exactly one bare session_ended.
+	if _, ok := recvOutbound(t, peer).(proto.SessionEnded); !ok {
+		t.Fatal("peer: expected a bare session_ended when prev was taken over")
+	}
+	expectNoOutbound(t, peer)
+
+	// The pairing is gone: the stale Unregister prev's handler eventually fires
+	// is a no-op that notifies nobody, and the peer is freely re-matchable.
+	h.Unregister(prev)
+	expectNoOutbound(t, peer)
+
+	c := newSession("c")
+	h.Register(c)
+	h.Ready(c)
+	h.Ready(peer)
+	if mp, mc := matchedFrame(t, peer), matchedFrame(t, c); mp.SessionID == "" || mp.SessionID != mc.SessionID {
+		t.Fatalf("peer not cleanly unpaired after prev's takeover: %q vs %q", mp.SessionID, mc.SessionID)
+	}
+	expectNoOutbound(t, next) // the replacement was never made ready
+}
+
+// TestStaleLeaveAfterTakeoverIsNoOp covers the I/O-matrix row for a late leave
+// frame from a connection that was already taken over: leaveCmd never touches the
+// sessions map, so it cannot evict the replacement, and its teardownPair /
+// removeFromQueue both no-op on the already-displaced pointer, so nobody is
+// notified.
+func TestStaleLeaveAfterTakeoverIsNoOp(t *testing.T) {
+	h, stop := startHub(t)
+	defer stop()
+
+	prev := newSession("k")
+	peer := newSession("a")
+	h.Register(prev)
+	h.Register(peer)
+	h.Ready(prev)
+	h.Ready(peer)
+	_ = matchedFrame(t, prev)
+	_ = matchedFrame(t, peer)
+
+	// A newer connection for "k" takes over; drain the peer's takeover frame.
+	next := newSession("k")
+	h.Register(next)
+	select {
+	case <-prev.Evict:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prev.Evict was not closed on takeover")
+	}
+	if _, ok := recvOutbound(t, peer).(proto.SessionEnded); !ok {
+		t.Fatal("peer: expected a bare session_ended on takeover")
+	}
+
+	// The stale leave prev's read loop may still emit before it unwinds.
+	h.Leave(prev)
+
+	if got := h.Count(); got != 2 { // "k" (now next) + "a"
+		t.Fatalf("Count = %d, want 2 (stale leave evicted the replacement)", got)
+	}
+	expectNoOutbound(t, next) // replacement untouched
+	expectNoOutbound(t, peer) // nobody re-notified
+
+	// next is still the live owner of "k" and can be matched.
+	h.Ready(next)
+	h.Ready(peer)
+	if mn, mp := matchedFrame(t, next), matchedFrame(t, peer); mn.SessionID == "" || mn.SessionID != mp.SessionID {
+		t.Fatalf("next not usable after stale leave: %q vs %q", mn.SessionID, mp.SessionID)
+	}
+}
+
 func TestUnregisterWhilePairedNotifiesSurvivor(t *testing.T) {
 	h, stop := startHub(t)
 	defer stop()

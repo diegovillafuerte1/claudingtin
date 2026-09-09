@@ -157,6 +157,19 @@ func readMsg(t *testing.T, c *websocket.Conn) any {
 	return msg
 }
 
+// readRaw reads one frame and returns its bytes undecoded, for byte-identity
+// assertions on the wire form.
+func readRaw(t *testing.T, c *websocket.Conn) []byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, data, err := c.Read(ctx)
+	if err != nil {
+		t.Fatalf("read frame: %v", err)
+	}
+	return data
+}
+
 // expectOpenIdle asserts the socket is still open: a short read neither returns
 // a frame nor a close, it simply times out on our own context. Side effect —
 // coder/websocket closes the client conn once this read's context expires, so
@@ -580,6 +593,181 @@ func TestBusyWhilePairedDeliversSessionEndedToPeer(t *testing.T) {
 	// Both sockets stay open; nobody is re-enqueued or evicted.
 	if got := h.hub.Count(); got != 2 {
 		t.Fatalf("hub.Count = %d, want 2", got)
+	}
+}
+
+// TestSessionEndedBytesIdenticalAcrossCauses drives every exercisable
+// backend-side end cause and asserts the peer's session_ended frame is
+// byte-identical across all of them and equal to the canonical no-session_id /
+// no-cause frame.
+func TestSessionEndedBytesIdenticalAcrossCauses(t *testing.T) {
+	const canonical = `{"type":"session_ended","v":1}`
+
+	enc, err := proto.Encode(proto.SessionEnded{})
+	if err != nil {
+		t.Fatalf("encode SessionEnded: %v", err)
+	}
+	if string(enc) != canonical {
+		t.Fatalf("proto.Encode(SessionEnded{}) = %q, want canonical %q", string(enc), canonical)
+	}
+
+	frames := map[string][]byte{}
+
+	// Peer goes busy.
+	func() {
+		h := newHarness(t)
+		a, b := matchedPair(t, h, "acct-a", "acct-b")
+		writeMsg(t, a, proto.Busy{})
+		frames["busy"] = readRaw(t, b)
+	}()
+
+	// Peer disconnects.
+	func() {
+		h := newHarness(t)
+		a, b := matchedPair(t, h, "acct-a", "acct-b")
+		_ = a.CloseNow()
+		frames["disconnect"] = readRaw(t, b)
+	}()
+
+	// Peer leaves.
+	func() {
+		h := newHarness(t)
+		a, b := matchedPair(t, h, "acct-a", "acct-b")
+		writeMsg(t, a, proto.Leave{})
+		frames["leave"] = readRaw(t, b)
+	}()
+
+	// Connection takeover: A (key acct-K) is paired with B; a new hello for
+	// acct-K takes A over, and B — A's peer — is notified via teardownPair.
+	func() {
+		h := newHarness(t)
+		_, b := matchedPair(t, h, "acct-K", "acct-b")
+		a2 := h.dial(t)
+		writeMsg(t, a2, helloFor("acct-K", proto.PROTOCOL_VERSION))
+		frames["takeover"] = readRaw(t, b)
+	}()
+
+	for cause, got := range frames {
+		if string(got) != canonical {
+			t.Fatalf("%s: session_ended bytes = %q, want %q", cause, string(got), canonical)
+		}
+	}
+}
+
+// TestSessionEndedIsFinalFrameWithRacedChatMsg races a chat_msg against the end
+// for busy, leave, and peer-disconnect: the peer may receive that chat_msg
+// before session_ended or not at all, but never after, and session_ended is the
+// last frame on that session.
+func TestSessionEndedIsFinalFrameWithRacedChatMsg(t *testing.T) {
+	ends := map[string]func(t *testing.T, a *websocket.Conn){
+		"busy":       func(t *testing.T, a *websocket.Conn) { writeMsg(t, a, proto.Busy{}) },
+		"leave":      func(t *testing.T, a *websocket.Conn) { writeMsg(t, a, proto.Leave{}) },
+		"disconnect": func(t *testing.T, a *websocket.Conn) { _ = a.CloseNow() },
+	}
+	for name, endFn := range ends {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			a, b := matchedPair(t, h, "acct-a", "acct-b")
+
+			writeMsg(t, a, proto.ChatMsg{ClientMsgID: "c1", Text: "last words"})
+			endFn(t, a)
+
+			sawEnd := false
+			for {
+				ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+				_, data, err := b.Read(ctx)
+				cancel()
+				if err != nil {
+					break // idle timeout or socket close: no more frames
+				}
+				msg, derr := proto.Decode(data)
+				if derr != nil {
+					t.Fatalf("decode %q: %v", string(data), derr)
+				}
+				switch msg.(type) {
+				case proto.ChatMsg:
+					if sawEnd {
+						t.Fatal("chat_msg arrived AFTER session_ended")
+					}
+				case proto.SessionEnded:
+					if sawEnd {
+						t.Fatal("received a second session_ended")
+					}
+					sawEnd = true
+				default:
+					t.Fatalf("unexpected frame %T", msg)
+				}
+			}
+			if !sawEnd {
+				t.Fatal("never received session_ended")
+			}
+		})
+	}
+}
+
+// TestTakeoverVictimThatIsAlsoPeerGetsExactlyOneSessionEnded covers the handler
+// dedupe: a connection that is taken over while it is also the peer of a session
+// ending concurrently writes exactly one session_ended, then closes.
+func TestTakeoverVictimThatIsAlsoPeerGetsExactlyOneSessionEnded(t *testing.T) {
+	h := newHarness(t)
+
+	// victim (key acct-K) is paired with peer.
+	victim, peer := matchedPair(t, h, "acct-K", "acct-P")
+
+	// Concurrently: the peer ends the session AND a new connection takes over
+	// acct-K. The peer write runs on its own goroutine (no *testing.T use there).
+	busyFrame, err := proto.Encode(proto.Busy{})
+	if err != nil {
+		t.Fatalf("encode Busy: %v", err)
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = peer.Write(ctx, websocket.MessageText, busyFrame)
+	}()
+
+	a2 := h.dial(t)
+	writeMsg(t, a2, helloFor("acct-K", proto.PROTOCOL_VERSION))
+
+	// Exactly one session_ended, then a clean close with no second data frame.
+	if _, ok := readMsg(t, victim).(proto.SessionEnded); !ok {
+		t.Fatal("victim: expected a session_ended frame")
+	}
+	expectCloseNoData(t, victim, websocket.StatusNormalClosure)
+
+	// The replacement proceeds to the queue normally.
+	writeMsg(t, a2, proto.Ready{})
+	if _, ok := readMsg(t, a2).(proto.Queued); !ok {
+		t.Fatal("replacement: expected a queued frame")
+	}
+}
+
+// TestSessionEndedGuardReArmsOnRematch covers the `case proto.Matched: sentEnd
+// = false` arm in serveConn: once a session has ended on a socket, a fresh match
+// on that same socket must re-arm the per-session guard so the NEXT end still
+// delivers a session_ended. This fails if that re-arm line is removed.
+func TestSessionEndedGuardReArmsOnRematch(t *testing.T) {
+	h := newHarness(t)
+	a, b := matchedPair(t, h, "acct-a", "acct-b")
+
+	// First end: A leaves; B drains its session_ended (arms B's sentEnd guard).
+	writeMsg(t, a, proto.Leave{})
+	if _, ok := readMsg(t, b).(proto.SessionEnded); !ok {
+		t.Fatal("B: expected session_ended after A left the first session")
+	}
+
+	// Re-ready BOTH on the same connections; they re-match each other.
+	writeMsg(t, a, proto.Ready{})
+	writeMsg(t, b, proto.Ready{})
+	readMatched(t, a)
+	readMatched(t, b)
+
+	// End the SECOND session the same way: B must receive a SECOND
+	// session_ended on that same socket — proving the guard re-armed on the
+	// intervening proto.Matched.
+	writeMsg(t, a, proto.Leave{})
+	if _, ok := readMsg(t, b).(proto.SessionEnded); !ok {
+		t.Fatal("B: expected a second session_ended after the re-match ended — the sentEnd guard did not re-arm on proto.Matched")
 	}
 }
 
