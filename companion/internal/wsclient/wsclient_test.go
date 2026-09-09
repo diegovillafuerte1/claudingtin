@@ -330,13 +330,59 @@ func TestPleaseUpdateStopsRetries(t *testing.T) {
 	}
 }
 
-func TestSessionEndedEndsClient(t *testing.T) {
+// shrinkSessionEndedGrace makes the "was this close a takeover?" window tiny so
+// the late-drop case does not have to wait out the real 2s. Tests here never
+// run in parallel, so mutating the package var is safe.
+func shrinkSessionEndedGrace(t *testing.T) {
+	t.Helper()
+	og := sessionEndedCloseGrace
+	sessionEndedCloseGrace = 20 * time.Millisecond
+	t.Cleanup(func() { sessionEndedCloseGrace = og })
+}
+
+// TestSessionEndedSurfacedNonTerminal: a session_ended whose socket stays open
+// is a peer leaving a chat — it is delivered on SessionEnded() and Run keeps
+// serving (it does not return).
+func TestSessionEndedSurfacedNonTerminal(t *testing.T) {
 	shrinkBackoff(t)
 	s := newWSServerWith(t, func(idx int, conn *websocket.Conn) {
+		// Write and return: the wsServer's own read loop keeps the socket open,
+		// so this mirrors a peer leaving a chat, not a takeover.
 		b, _ := proto.Encode(proto.SessionEnded{})
 		_ = conn.Write(context.Background(), websocket.MessageText, b)
 	})
 	c := New(Config{URL: s.url(), AccountKey: "k"})
+	drainEvents(t, c)
+	_, res := runClient(t, c)
+
+	select {
+	case got := <-c.SessionEnded():
+		if got != (proto.SessionEnded{}) {
+			t.Fatalf("SessionEnded() delivered %+v, want the zero frame", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("session_ended was never surfaced on SessionEnded()")
+	}
+
+	select {
+	case r := <-res:
+		t.Fatalf("Run returned %v after a socket-open session_ended; it must keep serving", r)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestSessionEndedThenCloseEndsClient: a session_ended immediately followed by
+// the server closing the socket is a takeover / shutdown — Run returns
+// ResultSessionEnded and does not reconnect.
+func TestSessionEndedThenCloseEndsClient(t *testing.T) {
+	shrinkBackoff(t)
+	s := newWSServerWith(t, func(idx int, conn *websocket.Conn) {
+		b, _ := proto.Encode(proto.SessionEnded{})
+		_ = conn.Write(context.Background(), websocket.MessageText, b)
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	})
+	c := New(Config{URL: s.url(), AccountKey: "k"})
+	drainEvents(t, c)
 	_, res := runClient(t, c)
 
 	select {
@@ -345,7 +391,81 @@ func TestSessionEndedEndsClient(t *testing.T) {
 			t.Fatalf("Run returned %v, want ResultSessionEnded", got)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("Run did not return after session_ended")
+		t.Fatal("Run did not return after session_ended + close")
+	}
+
+	after := s.connCount()
+	time.Sleep(200 * time.Millisecond)
+	if s.connCount() != after {
+		t.Fatalf("client reconnected after a takeover close: %d → %d", after, s.connCount())
+	}
+}
+
+// TestSessionEndedThenFrameClearsTakeoverArm: any frame after a session_ended
+// (here: matched, and separately queued) means the socket is live and useful
+// again, so a prompt subsequent close is an ordinary drop (reconnect), not a
+// takeover exit. The grace is left at its full default on purpose — the close
+// lands well inside it, so the only thing that can produce a reconnect is the
+// arm being cleared by the intervening frame.
+func TestSessionEndedThenFrameClearsTakeoverArm(t *testing.T) {
+	frames := map[string]any{
+		"matched": proto.Matched{SessionID: "s2"},
+		"queued":  proto.Queued{},
+	}
+	for name, mid := range frames {
+		t.Run(name, func(t *testing.T) {
+			shrinkBackoff(t)
+			mid := mid
+			s := newWSServerWith(t, func(idx int, conn *websocket.Conn) {
+				if idx > 0 {
+					return // the reconnect
+				}
+				eb, _ := proto.Encode(proto.SessionEnded{})
+				_ = conn.Write(context.Background(), websocket.MessageText, eb)
+				mb, _ := proto.Encode(mid)
+				_ = conn.Write(context.Background(), websocket.MessageText, mb)
+				_ = conn.Close(websocket.StatusNormalClosure, "") // prompt — but the arm was cleared
+			})
+			c := New(Config{URL: s.url(), AccountKey: "k"})
+			drainEvents(t, c)
+			_, res := runClient(t, c)
+
+			waitFor(t, "a reconnect after the arm was cleared", func() bool { return s.connCount() >= 2 })
+			select {
+			case r := <-res:
+				t.Fatalf("Run returned %v; a %s should have cleared the takeover arm", r, name)
+			case <-time.After(100 * time.Millisecond):
+			}
+		})
+	}
+}
+
+// TestSessionEndedThenLateDropReconnects: a socket drop that lands well after
+// the session_ended (past sessionEndedCloseGrace) is an ordinary drop — the
+// client reconnects and re-announces rather than ending Run.
+func TestSessionEndedThenLateDropReconnects(t *testing.T) {
+	shrinkBackoff(t)
+	shrinkSessionEndedGrace(t)
+	lateDrop := 20 * sessionEndedCloseGrace // captured: well past the grace
+	s := newWSServerWith(t, func(idx int, conn *websocket.Conn) {
+		if idx > 0 {
+			return // second connection: just accept it, proving the reconnect
+		}
+		b, _ := proto.Encode(proto.SessionEnded{})
+		_ = conn.Write(context.Background(), websocket.MessageText, b)
+		time.Sleep(lateDrop)
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	})
+	c := New(Config{URL: s.url(), AccountKey: "k"})
+	drainEvents(t, c)
+	_, res := runClient(t, c)
+
+	waitFor(t, "a reconnect after a late drop", func() bool { return s.connCount() >= 2 })
+
+	select {
+	case r := <-res:
+		t.Fatalf("Run returned %v after a late drop; it must reconnect", r)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
@@ -435,7 +555,7 @@ func TestQueuedSurfacedToCaller(t *testing.T) {
 // TestQueuedBufferFullDoesNotWedgeReader: Queued() is a cap-1 buffer and the
 // serve goroutine's send onto it is non-blocking (drop-on-full). With the test
 // never draining Queued(), two back-to-back queued frames fill then overflow
-// the buffer; the read goroutine must not wedge, so the session_ended written
+// the buffer; the read goroutine must not wedge, so the please_update written
 // behind them still ends Run.
 func TestQueuedBufferFullDoesNotWedgeReader(t *testing.T) {
 	shrinkBackoff(t)
@@ -445,7 +565,7 @@ func TestQueuedBufferFullDoesNotWedgeReader(t *testing.T) {
 			qb, _ := proto.Encode(proto.Queued{})
 			_ = conn.Write(context.Background(), websocket.MessageText, qb)
 		}
-		eb, _ := proto.Encode(proto.SessionEnded{})
+		eb, _ := proto.Encode(proto.PleaseUpdate{})
 		_ = conn.Write(context.Background(), websocket.MessageText, eb)
 	})
 	c := New(Config{URL: s.url(), AccountKey: "k"})
@@ -455,8 +575,8 @@ func TestQueuedBufferFullDoesNotWedgeReader(t *testing.T) {
 
 	select {
 	case got := <-res:
-		if got != ResultSessionEnded {
-			t.Fatalf("Run returned %v, want ResultSessionEnded — the read goroutine wedged on a full Queued buffer?", got)
+		if got != ResultPleaseUpdate {
+			t.Fatalf("Run returned %v, want ResultPleaseUpdate — the read goroutine wedged on a full Queued buffer?", got)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run did not return — the read goroutine wedged on the full cap-1 Queued buffer")

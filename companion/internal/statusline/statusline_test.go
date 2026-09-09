@@ -17,6 +17,7 @@ func TestShowWritesOneLinePerPhase(t *testing.T) {
 		{"reconnecting", PhaseReconnecting, "lost the thread for a moment — picking it back up"},
 		{"update needed", PhaseUpdateNeeded, "this companion is out of date — grab the latest build to keep going"},
 		{"inert", PhaseInert, "nothing's connected — you can turn this on whenever you like"},
+		{"claude back", PhaseClaudeBack, "looks like their claude's back — catch you later"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,6 +79,26 @@ func TestFirstShowAlwaysWritesEvenForZeroPhase(t *testing.T) {
 	New(&b).Show(PhaseConnecting)
 	if !strings.Contains(b.String(), "connecting") {
 		t.Fatalf("first Show(PhaseConnecting) wrote %q", b.String())
+	}
+}
+
+// TestNoAlarmLanguage: no phase line — least of all an end line — carries
+// rejection or alarm vocabulary. The companion's whole exit story is "their
+// Claude came back", never "you were left / disconnected / blocked" (Story 3.2,
+// voice.md "Exit and disconnect copy").
+func TestNoAlarmLanguage(t *testing.T) {
+	banned := []string{
+		"left", "disconnect", "connection lost",
+		"rejected", "blocked", "reported", "are you sure",
+	}
+	// Every defined phase, plus the fallback.
+	for p := PhaseConnecting; p <= PhaseClaudeBack; p++ {
+		got := strings.ToLower(line(p))
+		for _, bad := range banned {
+			if strings.Contains(got, bad) {
+				t.Errorf("line(%v) = %q contains banned copy %q", p, got, bad)
+			}
+		}
 	}
 }
 

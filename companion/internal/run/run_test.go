@@ -61,6 +61,7 @@ type fakeClient struct {
 	queued   chan proto.Queued
 	matched  chan proto.Matched
 	chatMsgs chan proto.ChatMsg
+	sessEnd  chan proto.SessionEnded
 
 	mu          sync.Mutex
 	sent        []any
@@ -79,6 +80,7 @@ func newFakeClient() *fakeClient {
 		queued:   make(chan proto.Queued, 1),
 		matched:  make(chan proto.Matched, 1),
 		chatMsgs: make(chan proto.ChatMsg, 8),
+		sessEnd:  make(chan proto.SessionEnded, 1),
 		stop:     make(chan struct{}),
 	}
 }
@@ -145,6 +147,15 @@ func (f *fakeClient) Matched() <-chan proto.Matched { return f.matched }
 // ChatMsgs is nil-safe: a fakeClient built without a chatMsgs channel simply
 // never surfaces a peer line.
 func (f *fakeClient) ChatMsgs() <-chan proto.ChatMsg { return f.chatMsgs }
+
+// SessionEnded is nil-safe: a fakeClient built without a sessEnd channel simply
+// never surfaces a backend chat-end.
+func (f *fakeClient) SessionEnded() <-chan proto.SessionEnded { return f.sessEnd }
+
+// endSession delivers one in-band session_ended frame to loop (the socket stays
+// up, mirroring a peer leaving). endRunWith(ResultSessionEnded) is the separate
+// takeover/shutdown path where the socket also closes.
+func (f *fakeClient) endSession() { f.sessEnd <- proto.SessionEnded{} }
 
 func (f *fakeClient) SendChat(_ context.Context, m proto.ChatMsg) error {
 	f.mu.Lock()
@@ -862,8 +873,12 @@ func TestRunTearsDownWatcherOnSessionEnded(t *testing.T) {
 	}
 
 	rec := newWSRecorder(t, func(idx int, c *websocket.Conn) {
+		// session_ended + close is the takeover/shutdown pairing — the one
+		// session_ended shape that still ends Run (a socket-open session_ended
+		// is a peer leaving and keeps the companion connected).
 		b, _ := proto.Encode(proto.SessionEnded{})
 		_ = c.Write(context.Background(), websocket.MessageText, b)
+		_ = c.Close(websocket.StatusNormalClosure, "")
 	})
 
 	// A pre-acknowledged config dir: the gate is a straight-through
@@ -2170,5 +2185,113 @@ func TestSpinnerKilledWhenQuitIgnored(t *testing.T) {
 	}
 	if !sf.wasKilled() {
 		t.Fatal("teardown did not Kill() a spinner that ignored Quit")
+	}
+}
+
+// --- in-band session_ended: calm end presentation (Story 3.2) ----------------
+
+// TestInbandSessionEndedModelBackClosesToClaudeBackLine: a session_ended that
+// keeps the socket, received while the user's model is already back
+// (desired == stateBusy), tears the chat surface down and lands on the calm
+// PhaseClaudeBack status line — and the loop keeps running.
+func TestInbandSessionEndedModelBackClosesToClaudeBackLine(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	h.client.endSession()
+
+	select {
+	case <-f.quit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-band session_ended did not tear the chat surface down")
+	}
+
+	waitUntil(t, "the calm claude's-back line", func() bool {
+		return strings.Contains(h.out.String(), "their claude's back")
+	})
+
+	select {
+	case err := <-h.done:
+		t.Fatalf("loop returned %v on an in-band session_ended; it must keep running", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestInbandSessionEndedIdleShowsClaudeBackLine: the frame received with no
+// pane up at all (a duplicate, or an end while already idle) still lands on the
+// same calm line when the model is back, and the loop keeps running.
+func TestInbandSessionEndedIdleShowsClaudeBackLine(t *testing.T) {
+	h := startLoop(t) // desired stays stateBusy; nothing matched
+
+	h.client.endSession()
+
+	waitUntil(t, "the calm claude's-back line", func() bool {
+		return strings.Contains(h.out.String(), "their claude's back")
+	})
+	select {
+	case err := <-h.done:
+		t.Fatalf("loop returned %v on an in-band session_ended; it must keep running", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestInbandSessionEndedMidBurstReturnsToSpinner: the same frame, received while
+// the user is still in a think-time burst (desired == stateReady), tears the
+// chat down and returns the pane to the searching spinner — loop still running.
+func TestInbandSessionEndedMidBurstReturnsToSpinner(t *testing.T) {
+	chatMade := stubChatProgram(t)
+	searchMade := stubSearchProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	cf := waitChat(t, chatMade)
+
+	// Model starts thinking again while the chat is up: desired = ready.
+	h.events <- transcript.Event{Kind: transcript.TurnStart}
+	h.waitSent(t, "ready")
+
+	h.client.endSession()
+
+	select {
+	case <-cf.quit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session_ended mid-burst did not tear the chat surface down")
+	}
+	waitSearch(t, searchMade) // the pane returned to the spinner
+
+	select {
+	case err := <-h.done:
+		t.Fatalf("loop returned %v on an in-band session_ended; it must keep running", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestInbandSessionEndedWhileSearchingLeavesSpinnerUp: a session_ended received
+// while the searching spinner already owns the pane (no chat up) leaves the
+// spinner running and writes no status line — nothing to present differently.
+func TestInbandSessionEndedWhileSearchingLeavesSpinnerUp(t *testing.T) {
+	made := stubSearchProgram(t)
+	h := startLoop(t)
+
+	sf := readyThenQueued(t, h, made)
+	snapshot := h.out.String()
+
+	h.client.endSession()
+
+	// Give the arm time to run, then prove the spinner was untouched.
+	time.Sleep(100 * time.Millisecond)
+	if sf.quitted() {
+		t.Fatal("session_ended tore down a spinner that should have kept running")
+	}
+	if got := h.out.String(); got != snapshot {
+		t.Fatalf("session_ended wrote to the status line while the spinner owned the pane:\n%q", got)
+	}
+	select {
+	case err := <-h.done:
+		t.Fatalf("loop returned %v on an in-band session_ended; it must keep running", err)
+	case <-time.After(150 * time.Millisecond):
 	}
 }

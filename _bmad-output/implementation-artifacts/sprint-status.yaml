@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-01-2026 02:10
-last_updated: 09-08-2026 19:30
+last_updated: 09-08-2026 22:45
 project: claudingtin
 project_key: NOKEY
 tracking_system: file-system
@@ -57,7 +57,7 @@ development_status:
 
   epic-3: in-progress
   3-1-unified-session_ended-on-every-backend-side-end: review
-  3-2-their-claude-came-back-presentation-and-no-alarm-language: backlog
+  3-2-their-claude-came-back-presentation-and-no-alarm-language: review
   3-3-explicit-leave-control: backlog
   3-4-reconnect-grace-window: backlog
   3-5-silent-re-enqueue-while-busy: backlog

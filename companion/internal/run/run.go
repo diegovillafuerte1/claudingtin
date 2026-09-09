@@ -1,8 +1,18 @@
 // Package run is the companion's orchestrator: it wires the Story 1.3 transcript
 // watcher to the Story 1.4 websocket handshake so that the model's turn
 // boundaries become ready / busy frames on the wire, and maps the handful of
-// terminal conditions (server asked to update, another connection took over,
-// the watcher died, the context was cancelled) to the documented exits.
+// terminal conditions (server asked to update, a connection takeover / server
+// shutdown, the watcher died, the context was cancelled) to the documented
+// exits.
+//
+// A backend-side chat end arrives as an in-band session_ended (Story 3.1's one
+// byte-identical, cause-free frame) on client.SessionEnded(). It is not a
+// terminal condition: the socket is still ours, so loop shows one calm "their
+// Claude came back" state — the searching spinner if the model is still
+// thinking, the PhaseClaudeBack status line if it is back — and keeps running.
+// loop ends only when the server also closes the socket right after the frame
+// (a connection takeover, or a server shutdown), which surfaces as the
+// wsclient.ResultSessionEnded clientDone result.
 //
 // It owns one desired state (ready/busy) that every watcher event updates, a
 // sent state, and a short debounce so a seed replay or a fast burst of
@@ -145,6 +155,7 @@ type stateClient interface {
 	Queued() <-chan proto.Queued
 	Matched() <-chan proto.Matched
 	ChatMsgs() <-chan proto.ChatMsg
+	SessionEnded() <-chan proto.SessionEnded
 	SendChat(ctx context.Context, m proto.ChatMsg) error
 }
 
@@ -328,6 +339,10 @@ func loop(
 				<-ctx.Done()
 				return nil
 			case wsclient.ResultSessionEnded:
+				// The server closed the socket right after a session_ended: a
+				// connection takeover or a server shutdown (an in-band
+				// session_ended that keeps the socket is handled by the
+				// client.SessionEnded() arm instead, and does not end loop).
 				// The process returns nil right after, so there is no status
 				// line to hand back to — resume:false avoids a stale flash.
 				pm.stopAll()
@@ -435,6 +450,31 @@ func loop(
 			// PeerMsg; if no chat is active it is dropped (no panic, nothing to
 			// cfg.Out).
 			pm.sendPeer(cm.ClientMsgID, cm.Text)
+
+		case <-client.SessionEnded():
+			// The one calm, cause-free end presentation. The frame carries no
+			// reason and this arm never branches on one. The socket stays up —
+			// a peer left the chat, not the connection — so loop keeps running;
+			// a real takeover instead lands on clientDone below when the server
+			// closes the socket. No apology, no confirm, no rejection word
+			// anywhere on this path.
+			wasChatting := pm.chatActive()
+			pm.stopChat(false)
+			pm.log("companion: the other chat ended")
+			if desired == stateReady && wasChatting && !pm.anyActive() {
+				// Still mid-think-time: the pane returns to the searching
+				// spinner. Story 3.5 owns the backend re-enqueue that resolves
+				// it; until then the spinner just spins. The !anyActive guard
+				// matches the only other launchSearch call site (launchSearch
+				// itself has no idempotency guard).
+				pm.launchSearch()
+			} else {
+				// Model is back, or the frame arrived with no chat to tear
+				// down: land on the calm "their claude's back" line. showPhase
+				// is a no-op while the spinner still owns the pane, so a
+				// session_ended received mid-search leaves the search untouched.
+				pm.showPhase(statusline.PhaseClaudeBack)
+			}
 
 		case om := <-pm.sends():
 			// The chat surface echoed the user's own line optimistically and
