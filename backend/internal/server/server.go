@@ -185,8 +185,8 @@ func (s *server) serveConn(conn *websocket.Conn, remote string) {
 
 	// The read loop lives on its own goroutine so the handler's select can also
 	// wait on eviction and on hub-delivered outbound frames. Post-hello frames
-	// are decoded; only ready / busy / chat_msg do anything — every other frame,
-	// and any decode error, is ignored (the v1 discard behaviour).
+	// are decoded; only ready / busy / leave / chat_msg do anything — every other
+	// frame, and any decode error, is ignored (the v1 discard behaviour).
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
@@ -204,6 +204,12 @@ func (s *server) serveConn(conn *websocket.Conn, remote string) {
 				s.hub.Ready(sess)
 			case proto.Busy:
 				s.hub.Busy(sess)
+			case proto.Leave:
+				// A client leave ends the matched session the same way busy
+				// does: the hub routes it through teardownPair, the peer gets a
+				// byte-identical session_ended, and nothing is sent back to the
+				// leaver. A no-op in the hub if this session is not paired.
+				s.hub.Leave(sess)
 			case proto.ChatMsg:
 				// Relay to the paired peer only. The hub drops it if this
 				// session is not paired. No log line in either direction — even
@@ -212,6 +218,15 @@ func (s *server) serveConn(conn *websocket.Conn, remote string) {
 			}
 		}
 	}()
+
+	// sentEnd tracks whether this connection has already been told the CURRENT
+	// matched session ended. It is the handler-level guarantee that a connection
+	// writes at most one session_ended per matched session: the same socket can
+	// be told by both the hub teardown path (an Outbound SessionEnded) and the
+	// Evict case (a taken-over connection that is also someone's peer), and only
+	// the first write goes out. A fresh proto.Matched re-arms it, because one
+	// companion socket outlives many matches.
+	sentEnd := false
 
 	for {
 		select {
@@ -223,19 +238,34 @@ func (s *server) serveConn(conn *websocket.Conn, remote string) {
 		case msg := <-sess.Outbound:
 			// The hub matched or tore down this session. This handler is the
 			// sole writer for conn, so the frame is written here.
-			s.writeFrame(ctx, conn, msg)
 			switch msg.(type) {
 			case proto.Matched:
+				// A fresh match re-arms the per-session session_ended guard:
+				// one companion socket outlives many matches.
+				sentEnd = false
 				s.logger.Info("ws matched", "remote", remote)
 			case proto.SessionEnded:
+				if sentEnd {
+					// Already ended this session (the Evict case, or an earlier
+					// teardown frame, wrote it). Drop the duplicate — no write,
+					// no log.
+					continue
+				}
+				sentEnd = true
 				s.logger.Info("ws session ended", "remote", remote)
 			}
+			s.writeFrame(ctx, conn, msg)
 		case <-sess.Evict:
 			// A newer connection for this key took over. Tell this client its
-			// session ended, close normally, then cancel the connection context
-			// so the read loop returns even if the close alone does not unblock
-			// it, and wait for that loop to unwind.
-			s.writeFrame(ctx, conn, proto.SessionEnded{})
+			// session ended — unless the hub teardown path already sent one for
+			// this session (takeover racing a concurrent peer end) — close
+			// normally, then cancel the connection context so the read loop
+			// returns even if the close alone does not unblock it, and wait for
+			// that loop to unwind.
+			if !sentEnd {
+				s.writeFrame(ctx, conn, proto.SessionEnded{})
+				sentEnd = true
+			}
 			_ = conn.Close(websocket.StatusNormalClosure, "")
 			cancel()
 			<-readDone
