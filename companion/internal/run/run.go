@@ -34,6 +34,11 @@
 // paneManager (panemanager.go), lifted out of loop for Epic 2 retrospective
 // findings F4 (loop size) and F5 (launch/stop duplication). loop keeps its
 // for { select } and every case, and delegates pane work to pm.*.
+//
+// An explicit leave (Story 3.3) sends one proto.Leave, routes the pane the
+// same way a peer's session_ended does (spinner mid-burst, phaseFor(desired)
+// once the model is back), and suppresses later peer lines via the left latch
+// until the next matched opens a fresh chat.
 package run
 
 import (
@@ -157,6 +162,7 @@ type stateClient interface {
 	ChatMsgs() <-chan proto.ChatMsg
 	SessionEnded() <-chan proto.SessionEnded
 	SendChat(ctx context.Context, m proto.ChatMsg) error
+	SendLeave(ctx context.Context) error
 }
 
 // chatProgram is the slice of *tea.Program that loop drives, behind a seam so
@@ -272,6 +278,12 @@ func loop(
 	desired := stateBusy
 	sent := stateBusy
 	haveSent := false
+
+	// left latches true the instant an explicit leave is sent and gates the
+	// client.ChatMsgs() arm so a peer chat_msg already in flight is dropped, not
+	// forwarded. It clears only on a fresh matched — the one thing that should
+	// re-enable peer forwarding.
+	left := false
 
 	// pm owns the two pane surfaces (chat program + searching spinner) and the
 	// launch/stop/teardown, showPhase gate, breadcrumb router, and *Done /
@@ -443,12 +455,18 @@ func loop(
 			if !pm.chatActive() {
 				pm.stopSearch(false)
 				pm.launchChat(m)
+				left = false
 			}
 
 		case cm := <-client.ChatMsgs():
-			// An inbound peer line. Forward it to the live chat surface as a
-			// PeerMsg; if no chat is active it is dropped (no panic, nothing to
-			// cfg.Out).
+			// An inbound peer line. Dropped outright once this user has left
+			// (the left latch) — a chat_msg already in flight when the leave key
+			// was hit must not be shown. Otherwise forward it to the live chat
+			// surface as a PeerMsg; if no chat is active it is dropped (no
+			// panic, nothing to cfg.Out).
+			if left {
+				continue
+			}
 			pm.sendPeer(cm.ClientMsgID, cm.Text)
 
 		case <-client.SessionEnded():
@@ -494,8 +512,16 @@ func loop(
 			switch i {
 			case chatui.IntentLeave:
 				pm.stopChat(false)
+				left = true
+				if err := client.SendLeave(ctx); err != nil {
+					fmt.Fprintln(cfg.Err, "companion: leave could not be sent")
+				}
 				fmt.Fprintln(cfg.Err, "companion: leave requested from the chat surface")
-				pm.showPhase(phaseFor(desired))
+				if desired == stateReady && !pm.anyActive() {
+					pm.launchSearch() // Story 3.5 owns the backend re-enqueue
+				} else {
+					pm.showPhase(phaseFor(desired))
+				}
 			case chatui.IntentBlock:
 				pm.log("companion: block requested from the chat surface")
 			case chatui.IntentReport:
