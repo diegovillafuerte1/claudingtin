@@ -648,6 +648,42 @@ func TestSendChatFrameArrives(t *testing.T) {
 	})
 }
 
+func TestSendLeaveWithoutConnection(t *testing.T) {
+	c := New(Config{URL: "ws://127.0.0.1:0/ws", AccountKey: "k"})
+	if err := c.SendLeave(context.Background()); err != ErrNotConnected {
+		t.Fatalf("SendLeave with no connection = %v, want ErrNotConnected", err)
+	}
+}
+
+// TestSendLeaveFrameArrives: with a live connection SendLeave puts exactly one
+// leave frame on the wire after the hello.
+func TestSendLeaveFrameArrives(t *testing.T) {
+	shrinkBackoff(t)
+	s := newWSServer(t)
+	c := New(Config{URL: s.url(), AccountKey: "k"})
+	runClient(t, c)
+
+	<-c.Events() // Connected
+
+	if err := c.SendLeave(context.Background()); err != nil {
+		t.Fatalf("SendLeave: %v", err)
+	}
+	waitFor(t, "the leave frame", func() bool {
+		f := s.framesFor(0)
+		if len(f) < 2 {
+			return false
+		}
+		_, ok := f[1].(proto.Leave)
+		return ok
+	})
+	// Settle briefly and pin the count so a stray extra frame around the leave
+	// would fail this test, not just the presence check above.
+	time.Sleep(30 * time.Millisecond)
+	if got := len(s.framesFor(0)); got != 2 {
+		t.Fatalf("frame count after SendLeave = %d, want exactly 2 (hello, leave)", got)
+	}
+}
+
 func TestContextCancelStopsRun(t *testing.T) {
 	shrinkBackoff(t)
 	s := newWSServer(t)

@@ -1,7 +1,7 @@
 // Package wsclient owns the companion's single websocket to the backend: it
 // dials, sends the version + account-key hello as the first frame after every
-// (re)connect, carries ready/busy state frames and outbound chat_msg frames
-// out, watches for the five inbound frames that matter (queued, matched,
+// (re)connect, carries ready/busy state frames and outbound chat_msg and leave
+// frames out, watches for the five inbound frames that matter (queued, matched,
 // chat_msg, please_update, session_ended) — queued is surfaced on Queued() for
 // run.loop to raise the searching spinner, matched on Matched() to open the
 // chat surface, chat_msg on ChatMsgs() to render as a peer line, and
@@ -82,8 +82,12 @@ type Event struct {
 	Kind EventKind
 }
 
-// ErrNotConnected is returned by SendState when there is no live connection. It
-// is not fatal: the caller's state is re-pushed on the next Connected event.
+// ErrNotConnected is returned by SendState, SendChat, and SendLeave when there
+// is no live connection. It is not fatal, but the retry story differs by
+// caller: SendState's caller re-pushes on the next Connected event; SendChat
+// and SendLeave never queue or retry — the optimistic local echo (SendChat) or
+// the local end state (SendLeave) has already been shown, so the caller just
+// logs a content-free failure and moves on.
 var ErrNotConnected = errors.New("wsclient: not connected")
 
 // Config is the immutable configuration of a Client.
@@ -274,6 +278,21 @@ func (c *Client) SendChat(ctx context.Context, m proto.ChatMsg) error {
 		return ErrNotConnected
 	}
 	return c.writeFrame(ctx, conn, m)
+}
+
+// SendLeave writes one proto.Leave{} frame on the live connection. With no
+// live connection it returns ErrNotConnected; like SendChat there is no queue
+// or retry — the caller's local end state is already shown, so the leave send
+// is best-effort. The backend notifies only the peer; it never echoes leave
+// back to the sender.
+func (c *Client) SendLeave(ctx context.Context) error {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return ErrNotConnected
+	}
+	return c.writeFrame(ctx, conn, proto.Leave{})
 }
 
 func (c *Client) dial(ctx context.Context) (*websocket.Conn, error) {

@@ -63,15 +63,17 @@ type fakeClient struct {
 	chatMsgs chan proto.ChatMsg
 	sessEnd  chan proto.SessionEnded
 
-	mu          sync.Mutex
-	sent        []any
-	chatSent    []proto.ChatMsg // payloads passed to SendChat
-	sendErr     error           // returned by SendState when set
-	sendChatErr error           // returned by SendChat when set
-	sendGate    chan struct{}   // if non-nil, SendState blocks receiving from it
-	sendEntry   chan struct{}   // SendState signals here (non-blocking) on entering the gate
-	result      wsclient.Result
-	stop        chan struct{} // close to make Run return f.result
+	mu           sync.Mutex
+	sent         []any
+	chatSent     []proto.ChatMsg // payloads passed to SendChat
+	leaveCount   int             // number of SendLeave calls
+	sendErr      error           // returned by SendState when set
+	sendChatErr  error           // returned by SendChat when set
+	sendLeaveErr error           // returned by SendLeave when set
+	sendGate     chan struct{}   // if non-nil, SendState blocks receiving from it
+	sendEntry    chan struct{}   // SendState signals here (non-blocking) on entering the gate
+	result       wsclient.Result
+	stop         chan struct{} // close to make Run return f.result
 }
 
 func newFakeClient() *fakeClient {
@@ -134,6 +136,12 @@ func (f *fakeClient) setSendChatErr(err error) {
 	f.mu.Unlock()
 }
 
+func (f *fakeClient) setSendLeaveErr(err error) {
+	f.mu.Lock()
+	f.sendLeaveErr = err
+	f.mu.Unlock()
+}
+
 func (f *fakeClient) Events() <-chan wsclient.Event { return f.events }
 
 // Queued is nil-safe: a fakeClient built without a queued channel simply never
@@ -173,6 +181,22 @@ func (f *fakeClient) chatSentFrames() []proto.ChatMsg {
 	out := make([]proto.ChatMsg, len(f.chatSent))
 	copy(out, f.chatSent)
 	return out
+}
+
+func (f *fakeClient) SendLeave(_ context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.leaveCount++
+	if f.sendLeaveErr != nil {
+		return f.sendLeaveErr
+	}
+	return nil
+}
+
+func (f *fakeClient) leavesSent() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.leaveCount
 }
 
 func (f *fakeClient) endRunWith(r wsclient.Result) {
@@ -1451,6 +1475,9 @@ func TestLeaveIntentReturnsToStatusLine(t *testing.T) {
 	waitUntil(t, "the content-free leave breadcrumb on cfg.Err", func() bool {
 		return strings.Contains(h.errBuf.String(), "leave requested from the chat surface")
 	})
+	if got := h.client.leavesSent(); got != 1 {
+		t.Fatalf("leavesSent() = %d, want exactly 1 proto.Leave frame", got)
+	}
 	// The breadcrumb must not be pushed back into the (now dead) program.
 	if strings.Contains(f.printed(), "leave requested") {
 		t.Fatalf("leave breadcrumb went into the program instead of cfg.Err: %q", f.printed())
@@ -1817,6 +1844,278 @@ func TestTeardownStopsInboundForwarding(t *testing.T) {
 	}
 	if len(f.receivedMsgs()) != before {
 		t.Fatalf("received message count changed after teardown: %d -> %d", before, len(f.receivedMsgs()))
+	}
+}
+
+// TestLeaveIntentModelBackShowsWaitingLine: leaving while desired == stateBusy
+// (the model is already back) shows phaseFor(desired) — the honest "you're
+// back with claude" line, never PhaseClaudeBack (that line is the
+// peer-protection fiction for the *remaining* user, not the leaver).
+func TestLeaveIntentModelBackShowsWaitingLine(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	f.notify(chatui.IntentLeave)
+
+	select {
+	case <-f.quit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("leave did not stop the chat program")
+	}
+
+	waitUntil(t, "the waiting status line", func() bool {
+		return strings.Contains(h.out.String(), "you're back with claude")
+	})
+	if strings.Contains(h.out.String(), "their claude's back") {
+		t.Fatalf("leave showed the peer-protection PhaseClaudeBack line instead of phaseFor(desired):\n%s", h.out.String())
+	}
+
+	select {
+	case err := <-h.done:
+		t.Fatalf("loop returned %v after a leave; the process must stay alive", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestLeaveIntentMidBurstRaisesSpinner: leaving while desired == stateReady
+// (still mid think-time burst) tears the chat down and raises the searching
+// spinner instead of the status line — Story 3.5 owns the backend
+// re-enqueue that eventually resolves it.
+func TestLeaveIntentMidBurstRaisesSpinner(t *testing.T) {
+	chatMade := stubChatProgram(t)
+	searchMade := stubSearchProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, chatMade)
+
+	// Model starts thinking again while the chat is up: desired = ready.
+	h.events <- transcript.Event{Kind: transcript.TurnStart}
+	h.waitSent(t, "ready")
+
+	f.notify(chatui.IntentLeave)
+
+	select {
+	case <-f.quit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("leave did not stop the chat program")
+	}
+	waitSearch(t, searchMade) // the pane landed on the spinner, not the status line
+
+	if got := h.client.leavesSent(); got != 1 {
+		t.Fatalf("leavesSent() = %d, want exactly 1", got)
+	}
+
+	select {
+	case err := <-h.done:
+		t.Fatalf("loop returned %v after a leave; the process must stay alive", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestLeaveIntentSendFailureStillShowsEndState: when SendLeave fails (no live
+// connection) the local end state is still presented at once and loop keeps
+// running — the send is best-effort, never a gate on the presentation.
+func TestLeaveIntentSendFailureStillShowsEndState(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+	h.client.setSendLeaveErr(wsclient.ErrNotConnected)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	f.notify(chatui.IntentLeave)
+
+	select {
+	case <-f.quit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("leave did not stop the chat program")
+	}
+
+	waitUntil(t, "the waiting status line", func() bool {
+		return strings.Contains(h.out.String(), "you're back with claude")
+	})
+	if got := h.client.leavesSent(); got != 1 {
+		t.Fatalf("leavesSent() = %d, want exactly 1 attempted send", got)
+	}
+
+	select {
+	case err := <-h.done:
+		t.Fatalf("loop returned %v after a leave with no connection; the process must stay alive", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestMatchedAfterLeaveClearsLeftGate: once a fresh matched opens a new chat
+// after a leave, the left gate is cleared and a later peer chat_msg is
+// forwarded again.
+func TestMatchedAfterLeaveClearsLeftGate(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	f.notify(chatui.IntentLeave)
+	select {
+	case <-f.quit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("leave did not stop the chat program")
+	}
+
+	// A fresh matched clears the left latch and opens a new surface.
+	h.client.matched <- proto.Matched{Opener: "o2"}
+	f2 := waitChat(t, made)
+
+	h.client.chatMsgs <- proto.ChatMsg{ClientMsgID: "peer-new", Text: "hi again"}
+
+	waitUntil(t, "the peer line forwarded to the new chat surface", func() bool {
+		for _, m := range f2.receivedMsgs() {
+			if pm, ok := m.(chatui.PeerMsg); ok && pm.ClientMsgID == "peer-new" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// TestMatchedAfterMidBurstLeaveClearsLeftGate: the mid-burst variant of
+// TestMatchedAfterLeaveClearsLeftGate — a leave that raised the spinner
+// (desired == stateReady) is followed by a fresh matched, which must tear the
+// spinner down, open a new chat, and clear left so peer lines forward again.
+func TestMatchedAfterMidBurstLeaveClearsLeftGate(t *testing.T) {
+	chatMade := stubChatProgram(t)
+	searchMade := stubSearchProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, chatMade)
+
+	h.events <- transcript.Event{Kind: transcript.TurnStart}
+	h.waitSent(t, "ready")
+
+	f.notify(chatui.IntentLeave)
+	select {
+	case <-f.quit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("leave did not stop the chat program")
+	}
+	waitSearch(t, searchMade)
+
+	// A fresh matched tears the spinner down, opens a new chat, and clears left.
+	h.client.matched <- proto.Matched{Opener: "o2"}
+	f2 := waitChat(t, chatMade)
+
+	h.client.chatMsgs <- proto.ChatMsg{ClientMsgID: "peer-new", Text: "hi again"}
+
+	waitUntil(t, "the peer line forwarded to the new chat surface", func() bool {
+		for _, m := range f2.receivedMsgs() {
+			if pm, ok := m.(chatui.PeerMsg); ok && pm.ClientMsgID == "peer-new" {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// TestLeaveIntentMidBurstSendFailureStillRaisesSpinner: the mid-burst variant
+// of TestLeaveIntentSendFailureStillShowsEndState — a failed SendLeave does
+// not stop the spinner from being raised when desired == stateReady.
+func TestLeaveIntentMidBurstSendFailureStillRaisesSpinner(t *testing.T) {
+	chatMade := stubChatProgram(t)
+	searchMade := stubSearchProgram(t)
+	h := startLoop(t)
+	h.client.setSendLeaveErr(wsclient.ErrNotConnected)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, chatMade)
+
+	h.events <- transcript.Event{Kind: transcript.TurnStart}
+	h.waitSent(t, "ready")
+
+	f.notify(chatui.IntentLeave)
+	select {
+	case <-f.quit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("leave did not stop the chat program")
+	}
+	waitSearch(t, searchMade)
+
+	if got := h.client.leavesSent(); got != 1 {
+		t.Fatalf("leavesSent() = %d, want exactly 1 attempted send", got)
+	}
+
+	select {
+	case err := <-h.done:
+		t.Fatalf("loop returned %v after a leave with no connection; the process must stay alive", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestLeaveIntentGenericSendErrorStillShowsEndState: a SendLeave failure that
+// is not ErrNotConnected (e.g. a mid-write socket error) is handled the same
+// way — content-free breadcrumb, local end state shown, loop stays up.
+func TestLeaveIntentGenericSendErrorStillShowsEndState(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+	h.client.setSendLeaveErr(errors.New("boom"))
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	f.notify(chatui.IntentLeave)
+
+	select {
+	case <-f.quit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("leave did not stop the chat program")
+	}
+
+	waitUntil(t, "the waiting status line", func() bool {
+		return strings.Contains(h.out.String(), "you're back with claude")
+	})
+	if got := h.client.leavesSent(); got != 1 {
+		t.Fatalf("leavesSent() = %d, want exactly 1 attempted send", got)
+	}
+
+	select {
+	case err := <-h.done:
+		t.Fatalf("loop returned %v after a leave send error; the process must stay alive", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestRepeatLeaveKeySendsExactlyOneFrame pins the spec's "Repeat leave key"
+// matrix row: chatIntents is buffered, so two IntentLeave notifies delivered
+// before the surface tears down still result in exactly one proto.Leave frame
+// — loop only ever reads one before pm.stopChat nils pm.chatIntents, orphaning
+// any second buffered notify in a channel loop no longer reads from.
+func TestRepeatLeaveKeySendsExactlyOneFrame(t *testing.T) {
+	made := stubChatProgram(t)
+	h := startLoop(t)
+
+	h.client.matched <- proto.Matched{Opener: "o"}
+	f := waitChat(t, made)
+
+	f.notify(chatui.IntentLeave)
+	f.notify(chatui.IntentLeave)
+
+	select {
+	case <-f.quit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("leave did not stop the chat program")
+	}
+
+	waitUntil(t, "the content-free leave breadcrumb on cfg.Err", func() bool {
+		return strings.Contains(h.errBuf.String(), "leave requested from the chat surface")
+	})
+	// Give a stray second delivery a chance to land before asserting the count.
+	time.Sleep(60 * time.Millisecond)
+	if got := h.client.leavesSent(); got != 1 {
+		t.Fatalf("leavesSent() = %d, want exactly 1 despite two buffered leave notifies", got)
 	}
 }
 
