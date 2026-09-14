@@ -14,7 +14,7 @@ import (
 // fails if a registered type has no sample here.
 var roundTripSamples = []any{
 	// client -> server
-	Hello{AccountKey: "acct-1a2b3c", ProtocolVersion: 1},
+	Hello{AccountKey: "acct-1a2b3c", ProtocolVersion: 1, SessionID: "s-9f8e7d6c5b4a"},
 	Ready{},
 	Busy{},
 	ChatMsg{ClientMsgID: "cmid-42", Text: "héllo 😀 مرحبا"},

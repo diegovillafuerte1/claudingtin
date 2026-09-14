@@ -23,10 +23,14 @@ const TypeHello = "hello"
 
 // Hello is the first frame the companion sends after the socket opens. It
 // carries the client's protocol version and the account key that is the user's
-// whole identity to the backend.
+// whole identity to the backend. SessionID, when non-empty, names a session
+// this connection wants to resume within the backend's reconnect grace window
+// (Story 3.4); a plain connect or fresh re-match omits it, so the wire form is
+// unchanged for every caller that does not set it.
 type Hello struct {
 	AccountKey      string `json:"account_key"`
 	ProtocolVersion int    `json:"protocol_version"`
+	SessionID       string `json:"session_id,omitempty"`
 }
 
 // TypeReady is the discriminator for Ready.
