@@ -257,6 +257,23 @@ func helloFor(key string, pv int) proto.Hello {
 	return proto.Hello{AccountKey: key, ProtocolVersion: pv}
 }
 
+// helloResume is helloFor plus a session_id, for a reconnect that wants to
+// resume a specific session (Story 3.4).
+func helloResume(key string, pv int, sessionID string) proto.Hello {
+	return proto.Hello{AccountKey: key, ProtocolVersion: pv, SessionID: sessionID}
+}
+
+// shrinkGraceWindow makes the backend's reconnect grace window tiny so the
+// timing-sensitive disconnect-while-paired cases run fast (mirrors
+// hub_test.go's own shrinkGraceWindow). Tests here never run in parallel, so
+// mutating the hub package's exported var is safe.
+func shrinkGraceWindow(t *testing.T) {
+	t.Helper()
+	orig := hub.ReconnectGraceWindow
+	hub.ReconnectGraceWindow = 300 * time.Millisecond
+	t.Cleanup(func() { hub.ReconnectGraceWindow = orig })
+}
+
 // readMatched reads frames from c until it sees a matched frame (a queued frame
 // may legitimately arrive first) and returns it.
 func readMatched(t *testing.T, c *websocket.Conn) proto.Matched {
@@ -552,6 +569,7 @@ func TestQueuedDialClosingIsSilentAndUncounted(t *testing.T) {
 }
 
 func TestPairedDialClosingDeliversSessionEndedToPeer(t *testing.T) {
+	shrinkGraceWindow(t)
 	h := newHarness(t)
 
 	a := h.dial(t)
@@ -570,6 +588,58 @@ func TestPairedDialClosingDeliversSessionEndedToPeer(t *testing.T) {
 		t.Fatal("B: expected a bare session_ended after A dropped")
 	}
 	waitCount(t, h.hub, 1)
+}
+
+// TestQuickResumeWithinGraceWindowOverWebsocket is the end-to-end companion to
+// hub_test.go's TestQuickResumeWithinGraceWindowSendsNoSessionEnded: A's socket
+// drops mid-session and a fresh websocket dial for the same account key,
+// presenting the session_id it was matched with, resumes the pairing inside
+// the grace window — B never sees a session_ended (the very next frame it
+// reads is the relayed chat_msg, not an end), the relay works both ways again
+// on the new connection, and the key is not double-counted.
+func TestQuickResumeWithinGraceWindowOverWebsocket(t *testing.T) {
+	shrinkGraceWindow(t)
+	h := newHarness(t)
+
+	a := h.dial(t)
+	writeMsg(t, a, helloFor("acct-a", proto.PROTOCOL_VERSION))
+	b := h.dial(t)
+	writeMsg(t, b, helloFor("acct-b", proto.PROTOCOL_VERSION))
+	waitCount(t, h.hub, 2)
+	writeMsg(t, a, proto.Ready{})
+	writeMsg(t, b, proto.Ready{})
+	ma := readMatched(t, a)
+	readMatched(t, b)
+
+	_ = a.CloseNow() // A's socket drops while paired; the pairing is grace-held
+
+	// A reconnects immediately, presenting the same account key and the
+	// session_id it was matched with.
+	a2 := h.dial(t)
+	writeMsg(t, a2, helloResume("acct-a", proto.PROTOCOL_VERSION, ma.SessionID))
+
+	// The relay works both ways on the resumed connection: the very next
+	// frame each side reads is the relayed chat_msg, not a session_ended.
+	writeMsg(t, a2, proto.ChatMsg{ClientMsgID: "c1", Text: "back already"})
+	got, ok := readMsg(t, b).(proto.ChatMsg)
+	if !ok || got.Text != "back already" {
+		t.Fatalf("B: expected the relayed chat_msg, got %#v", got)
+	}
+	writeMsg(t, b, proto.ChatMsg{ClientMsgID: "c2", Text: "hi"})
+	got2, ok := readMsg(t, a2).(proto.ChatMsg)
+	if !ok || got2.Text != "hi" {
+		t.Fatalf("a2: expected the relayed chat_msg, got %#v", got2)
+	}
+
+	if got := h.hub.Count(); got != 2 {
+		t.Fatalf("hub.Count = %d, want 2 (resume must not double-count or drop the key)", got)
+	}
+
+	// Even once the (now-cancelled) grace window would have expired, B gets
+	// nothing further — proving the resume, not a lingering timer, is what
+	// silenced the peer notification. Called last: coder/websocket may close
+	// the conn once this read's context expires.
+	expectNoFrame(t, b, 500*time.Millisecond)
 }
 
 func TestBusyWhilePairedDeliversSessionEndedToPeer(t *testing.T) {
@@ -601,6 +671,7 @@ func TestBusyWhilePairedDeliversSessionEndedToPeer(t *testing.T) {
 // byte-identical across all of them and equal to the canonical no-session_id /
 // no-cause frame.
 func TestSessionEndedBytesIdenticalAcrossCauses(t *testing.T) {
+	shrinkGraceWindow(t)
 	const canonical = `{"type":"session_ended","v":1}`
 
 	enc, err := proto.Encode(proto.SessionEnded{})
@@ -659,6 +730,7 @@ func TestSessionEndedBytesIdenticalAcrossCauses(t *testing.T) {
 // before session_ended or not at all, but never after, and session_ended is the
 // last frame on that session.
 func TestSessionEndedIsFinalFrameWithRacedChatMsg(t *testing.T) {
+	shrinkGraceWindow(t)
 	ends := map[string]func(t *testing.T, a *websocket.Conn){
 		"busy":       func(t *testing.T, a *websocket.Conn) { writeMsg(t, a, proto.Busy{}) },
 		"leave":      func(t *testing.T, a *websocket.Conn) { writeMsg(t, a, proto.Leave{}) },
@@ -912,6 +984,7 @@ func TestChatMsgMultiByteTextArrivesIntact(t *testing.T) {
 }
 
 func TestChatMsgAfterPeerLeftIsDroppedWithNoError(t *testing.T) {
+	shrinkGraceWindow(t)
 	h := newHarness(t)
 	a, b := matchedPair(t, h, "acct-a", "acct-b")
 

@@ -175,6 +175,11 @@ func (s *server) serveConn(conn *websocket.Conn, remote string) {
 		Evict:    make(chan struct{}),
 		Outbound: make(chan any, 32),
 	}
+	// Carry a resume request into the hub before Register, so registerCmd can
+	// tell a reconnect naming its own grace-held session_id (Story 3.4) apart
+	// from an ordinary hello or takeover. Empty for a plain connect or fresh
+	// re-match, keeping the wire form unchanged for every other caller.
+	sess.ResumeSessionID = hello.SessionID
 	s.hub.Register(sess)
 	s.logger.Info("ws connected", "remote", remote, "pv", pv)
 

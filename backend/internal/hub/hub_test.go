@@ -41,6 +41,19 @@ func expectNoOutbound(t *testing.T, s *Session) {
 	}
 }
 
+// shrinkGraceWindow makes the reconnect grace window tiny so the timing-
+// sensitive cases run fast (mirrors wsclient_test.go's shrinkBackoff /
+// shrinkSessionEndedGrace). Tests here never run in parallel, so mutating the
+// package var is safe. It stays large enough (well over expectNoOutbound's
+// 100ms window) that a resume issued immediately after Unregister — with no
+// deliberate delay in between — reliably lands before the timer fires.
+func shrinkGraceWindow(t *testing.T) {
+	t.Helper()
+	orig := ReconnectGraceWindow
+	ReconnectGraceWindow = 300 * time.Millisecond
+	t.Cleanup(func() { ReconnectGraceWindow = orig })
+}
+
 // startHub runs a Hub on a goroutine and returns it plus a stop func.
 func startHub(t *testing.T) (*Hub, func()) {
 	t.Helper()
@@ -747,7 +760,13 @@ func TestStaleLeaveAfterTakeoverIsNoOp(t *testing.T) {
 	}
 }
 
+// TestUnregisterWhilePairedNotifiesSurvivor covers the reconnect-grace-window
+// timeout path (Story 3.4): A's disconnect while paired no longer tears the
+// pairing down immediately — it is held for ReconnectGraceWindow — so B's
+// session_ended only arrives once that window actually expires with no
+// resume.
 func TestUnregisterWhilePairedNotifiesSurvivor(t *testing.T) {
+	shrinkGraceWindow(t)
 	h, stop := startHub(t)
 	defer stop()
 
@@ -762,7 +781,7 @@ func TestUnregisterWhilePairedNotifiesSurvivor(t *testing.T) {
 	h.Unregister(a) // A's socket dropped
 
 	if _, ok := recvOutbound(t, b).(proto.SessionEnded); !ok {
-		t.Fatal("B: expected a bare session_ended after A disconnected")
+		t.Fatal("B: expected a bare session_ended once the grace window expired")
 	}
 	expectNoOutbound(t, b) // not re-enqueued
 
@@ -774,6 +793,290 @@ func TestUnregisterWhilePairedNotifiesSurvivor(t *testing.T) {
 		t.Fatal("C: expected queued (B must not still be matchable via a stale pairing)")
 	}
 	_ = b
+}
+
+// --- reconnect grace window (Story 3.4) -------------------------------------
+
+// TestQuickResumeWithinGraceWindowSendsNoSessionEnded covers the matrix row
+// "Paired, brief drop, quick resume": A drops, and a new connection for A's
+// key presenting A's own session_id arrives before the grace window expires.
+// B never sees a session_ended, the pairing is repointed onto the new
+// connection with the SAME session_id (no mint), and the relay works both
+// ways again — all with no deliberate delay between the drop and the resume,
+// proving the hold survives at least that long.
+func TestQuickResumeWithinGraceWindowSendsNoSessionEnded(t *testing.T) {
+	shrinkGraceWindow(t)
+	h, stop := startHub(t)
+	defer stop()
+
+	a, b := newSession("a"), newSession("b")
+	h.Register(a)
+	h.Register(b)
+	h.Ready(a)
+	h.Ready(b)
+	ma := matchedFrame(t, a)
+	_ = matchedFrame(t, b)
+
+	h.Unregister(a) // A's socket drops; the pairing is held, not torn down
+
+	// A reconnects immediately, naming its own session_id.
+	a2 := newSession("a")
+	a2.ResumeSessionID = ma.SessionID
+	h.Register(a2)
+
+	// Silent resume: nobody gets anything, even after the (now-cancelled)
+	// grace window would have expired.
+	expectNoOutbound(t, b)
+	expectNoOutbound(t, a2)
+
+	// h.Count() round-trips through the hub goroutine, so it happens-after the
+	// registerCmd body above finished — including its write to a2.SessionID —
+	// making the read below race-free.
+	_ = h.Count()
+	if a2.SessionID != ma.SessionID {
+		t.Fatalf("resumed session_id = %q, want the original %q (no re-mint)", a2.SessionID, ma.SessionID)
+	}
+
+	// The relay works both ways on the resumed pairing.
+	h.Relay(a2, proto.ChatMsg{ClientMsgID: "c1", Text: "back"})
+	if got, ok := recvOutbound(t, b).(proto.ChatMsg); !ok || got.Text != "back" {
+		t.Fatalf("B: expected the relayed chat_msg, got %#v", got)
+	}
+	h.Relay(b, proto.ChatMsg{ClientMsgID: "c2", Text: "hi"})
+	if got, ok := recvOutbound(t, a2).(proto.ChatMsg); !ok || got.Text != "hi" {
+		t.Fatalf("a2: expected the relayed chat_msg, got %#v", got)
+	}
+}
+
+// TestReconnectWithWrongSessionIDTearsDownHeldPairing covers the mismatched-id
+// half of the matrix row "Paired, drop, reconnect with wrong/absent/expired
+// session_id": a still-held pairing (grace not yet expired) whose reconnect
+// names a session_id that is not the one being held tears down now, exactly
+// like an immediate teardown — B gets its session_ended right away, no wait
+// for the window — and the new connection is ALSO told its named session_id
+// ended (the resume it asked for did not happen), resetting any stale local
+// pane via the same cause-agnostic frame.
+func TestReconnectWithWrongSessionIDTearsDownHeldPairing(t *testing.T) {
+	shrinkGraceWindow(t)
+	h, stop := startHub(t)
+	defer stop()
+
+	a, b := newSession("a"), newSession("b")
+	h.Register(a)
+	h.Register(b)
+	h.Ready(a)
+	h.Ready(b)
+	_ = matchedFrame(t, a)
+	_ = matchedFrame(t, b)
+
+	h.Unregister(a) // A's socket drops; grace-held
+
+	a2 := newSession("a")
+	a2.ResumeSessionID = "not-the-right-id"
+	h.Register(a2)
+
+	if _, ok := recvOutbound(t, b).(proto.SessionEnded); !ok {
+		t.Fatal("B: expected a bare session_ended after A's mismatched reconnect")
+	}
+	expectNoOutbound(t, b)
+	if _, ok := recvOutbound(t, a2).(proto.SessionEnded); !ok {
+		t.Fatal("a2: expected a session_ended for its failed resume attempt")
+	}
+	expectNoOutbound(t, a2)
+
+	// The new connection is otherwise an ordinary fresh session: it can be
+	// readied and matched like any other.
+	c := newSession("c")
+	h.Register(c)
+	h.Ready(a2)
+	h.Ready(c)
+	ma2, mc := matchedFrame(t, a2), matchedFrame(t, c)
+	if ma2.SessionID == "" || ma2.SessionID != mc.SessionID {
+		t.Fatalf("a2/c did not cleanly match: %q vs %q", ma2.SessionID, mc.SessionID)
+	}
+}
+
+// TestReconnectAfterGraceExpiryGetsSessionEndedAndCanRematch covers the
+// expired half of the same matrix row: once the grace window has actually
+// timed out (B already has its session_ended and the key is fully
+// unregistered), a late reconnect naming that now-stale session_id gets
+// exactly one session_ended on its OWN new connection — resetting a stale
+// local pane — and can then be readied and matched normally.
+func TestReconnectAfterGraceExpiryGetsSessionEndedAndCanRematch(t *testing.T) {
+	shrinkGraceWindow(t)
+	h, stop := startHub(t)
+	defer stop()
+
+	a, b := newSession("a"), newSession("b")
+	h.Register(a)
+	h.Register(b)
+	h.Ready(a)
+	h.Ready(b)
+	ma := matchedFrame(t, a)
+	_ = matchedFrame(t, b)
+
+	h.Unregister(a) // grace-held
+
+	if _, ok := recvOutbound(t, b).(proto.SessionEnded); !ok {
+		t.Fatal("B: expected a bare session_ended once the grace window expired")
+	}
+	expectNoOutbound(t, b)
+
+	// A reconnects late, naming the now-expired session_id.
+	a2 := newSession("a")
+	a2.ResumeSessionID = ma.SessionID
+	h.Register(a2)
+
+	if _, ok := recvOutbound(t, a2).(proto.SessionEnded); !ok {
+		t.Fatal("a2: expected a session_ended for the stale resume attempt")
+	}
+	expectNoOutbound(t, a2)
+
+	c := newSession("c")
+	h.Register(c)
+	h.Ready(a2)
+	h.Ready(c)
+	ma2, mc := matchedFrame(t, a2), matchedFrame(t, c)
+	if ma2.SessionID == "" || ma2.SessionID != mc.SessionID {
+		t.Fatalf("a2/c did not cleanly match: %q vs %q", ma2.SessionID, mc.SessionID)
+	}
+}
+
+// TestResumeAfterPeerLeftDuringGraceGetsSessionEnded covers a gap review
+// caught: B's pairing entry can disappear out from under a grace-held A
+// before A ever reconnects — here because B explicitly leaves, but Busy hits
+// the identical path. teardownPair(B) deletes both p.pairings directions but
+// has no reason to touch A's graceTimer (it doesn't know A is grace-held), so
+// A's timer keeps running and A.SessionID stays valid. A must not come back
+// as a silent "resume" with nothing to show for it: it gets the
+// session_ended its actually-ended session earned.
+func TestResumeAfterPeerLeftDuringGraceGetsSessionEnded(t *testing.T) {
+	shrinkGraceWindow(t)
+	h, stop := startHub(t)
+	defer stop()
+
+	a, b := newSession("a"), newSession("b")
+	h.Register(a)
+	h.Register(b)
+	h.Ready(a)
+	h.Ready(b)
+	ma := matchedFrame(t, a)
+	_ = matchedFrame(t, b)
+
+	h.Unregister(a) // A's socket drops; grace-held, timer running
+
+	h.Leave(b) // B leaves while A is still grace-held — B gets nothing back
+
+	// A reconnects promptly, naming its own still-valid session_id — the
+	// timer has not expired and the id genuinely matches, but there is no
+	// pairing left to repoint onto.
+	a2 := newSession("a")
+	a2.ResumeSessionID = ma.SessionID
+	h.Register(a2)
+
+	if _, ok := recvOutbound(t, a2).(proto.SessionEnded); !ok {
+		t.Fatal("a2: expected a session_ended — the resume target's pairing is already gone")
+	}
+	expectNoOutbound(t, a2)
+	if a2.SessionID != "" {
+		t.Fatalf("a2.SessionID = %q, want empty (never repointed onto a dead pairing)", a2.SessionID)
+	}
+
+	// a2 is otherwise an ordinary fresh session: it can be readied and
+	// matched like any other, proving it was not left in some orphaned
+	// registered-but-unpaired-and-unqueued limbo.
+	c := newSession("c")
+	h.Register(c)
+	h.Ready(a2)
+	h.Ready(c)
+	ma2, mc := matchedFrame(t, a2), matchedFrame(t, c)
+	if ma2.SessionID == "" || ma2.SessionID != mc.SessionID {
+		t.Fatalf("a2/c did not cleanly match: %q vs %q", ma2.SessionID, mc.SessionID)
+	}
+}
+
+// TestResumeAttemptAgainstStillLiveSessionIsOrdinaryTakeover covers a
+// verification gap the review flagged: every other resume/mismatch test
+// disconnects `a` (arming graceTimer) before the resume attempt, so the
+// registerCmd condition `prev.graceTimer != nil && ... ResumeSessionID ==
+// prev.SessionID` never actually exercises its first conjunct — the ID match
+// alone would make every one of those tests pass too. Here `a` is never
+// unregistered: it is still fully live and paired when a2 reconnects naming
+// a's own (still current) session_id — the exact race between a client
+// deciding to reconnect and the backend's own read loop noticing the old
+// socket died. This must be treated as an ordinary takeover (a's Evict
+// closed, B gets one session_ended) and never as a silent resume — a still-
+// live connection's pairing must not be stolen out from under it with no
+// eviction and no notification to its peer. a2 also gets its own
+// session_ended: the uniform rule is that any Hello naming a session_id that
+// did not resolve into an actual resume gets told so on its own connection,
+// and "took over a still-live session instead" counts as not resolving.
+func TestResumeAttemptAgainstStillLiveSessionIsOrdinaryTakeover(t *testing.T) {
+	shrinkGraceWindow(t)
+	h, stop := startHub(t)
+	defer stop()
+
+	a, b := newSession("a"), newSession("b")
+	h.Register(a)
+	h.Register(b)
+	h.Ready(a)
+	h.Ready(b)
+	ma := matchedFrame(t, a)
+	_ = matchedFrame(t, b)
+
+	// a is never Unregistered: graceTimer stays nil throughout.
+	a2 := newSession("a")
+	a2.ResumeSessionID = ma.SessionID // names a's own still-current session_id
+	h.Register(a2)
+
+	select {
+	case <-a.Evict:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a: expected Evict closed — a still-live session must be evicted, not silently repointed")
+	}
+	if _, ok := recvOutbound(t, b).(proto.SessionEnded); !ok {
+		t.Fatal("B: expected a bare session_ended — the takeover path, not a silent resume")
+	}
+	expectNoOutbound(t, b)
+	if _, ok := recvOutbound(t, a2).(proto.SessionEnded); !ok {
+		t.Fatal("a2: expected a session_ended — its named resume did not resolve, it caused a takeover instead")
+	}
+	expectNoOutbound(t, a2)
+	if a2.SessionID != "" {
+		t.Fatalf("a2.SessionID = %q, want empty (a fresh takeover mints nothing)", a2.SessionID)
+	}
+}
+
+// TestQueuedDropIsUnaffectedByGraceWindow covers the matrix row "Queued,
+// drop": a session that was only queued (never paired) when it disconnects is
+// removed silently and immediately, with no grace timer at all — a fresh
+// connection reusing its key can be readied and matched right away, proving
+// nothing was left waiting on a timer or blocking the queue.
+func TestQueuedDropIsUnaffectedByGraceWindow(t *testing.T) {
+	shrinkGraceWindow(t)
+	h, stop := startHub(t)
+	defer stop()
+
+	a := newSession("a")
+	h.Register(a)
+	h.Ready(a)
+	if _, ok := recvOutbound(t, a).(proto.Queued); !ok {
+		t.Fatal("A: expected queued")
+	}
+
+	h.Unregister(a) // disconnect while queued: immediate silent removal
+	expectNoOutbound(t, a)
+
+	a2 := newSession("a")
+	h.Register(a2)
+	b := newSession("b")
+	h.Register(b)
+	h.Ready(a2)
+	h.Ready(b)
+	ma, mb := matchedFrame(t, a2), matchedFrame(t, b)
+	if ma.SessionID == "" || ma.SessionID != mb.SessionID {
+		t.Fatalf("a2/b did not cleanly match: %q vs %q", ma.SessionID, mb.SessionID)
+	}
 }
 
 // --- chat relay ----------------------------------------------------------
@@ -851,6 +1154,7 @@ func TestRelayFromUnpairedSessionIsSilentNoOp(t *testing.T) {
 // TestRelayAfterTeardownDrops: once the pairing has ended, a chat line from the
 // survivor finds no pairing entry and is dropped — no delivery, no error.
 func TestRelayAfterTeardownDrops(t *testing.T) {
+	shrinkGraceWindow(t)
 	h, stop := startHub(t)
 	defer stop()
 
@@ -862,7 +1166,8 @@ func TestRelayAfterTeardownDrops(t *testing.T) {
 	_ = matchedFrame(t, a)
 	_ = matchedFrame(t, b)
 
-	// B disconnects; A gets the bare session_ended and the pairing is gone.
+	// B disconnects; once the grace window expires A gets the bare
+	// session_ended and the pairing is gone.
 	h.Unregister(b)
 	if _, ok := recvOutbound(t, a).(proto.SessionEnded); !ok {
 		t.Fatal("A: expected session_ended after B disconnected")

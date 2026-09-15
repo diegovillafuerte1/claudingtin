@@ -14,6 +14,7 @@ package hub
 
 import (
 	"context"
+	"time"
 
 	"github.com/coder/websocket"
 
@@ -27,11 +28,24 @@ import (
 // connection handler a proto frame to write (queued / matched / session_ended).
 // The hub goroutine only ever closes Evict and does a non-blocking send on
 // Outbound; it never reads or writes Conn and never blocks on Outbound.
+//
+// Field ownership: Key, Conn, Evict, and Outbound are set once by the caller
+// before Register and never mutated by the hub. SessionID is hub-owned: it is
+// minted in drainQueue at match time and read back at a later resume attempt
+// to decide whether a reconnect names the same session. ResumeSessionID is written
+// exactly once by the server, from the inbound Hello, before Register is
+// called, and read once by the hub at register time; the hub never writes it.
+// graceTimer is hub-owned and non-nil only while a paired session's teardown is
+// being held open for Story 3.4's reconnect grace window.
 type Session struct {
 	Key      string
 	Conn     *websocket.Conn
 	Evict    chan struct{}
 	Outbound chan any
+
+	SessionID       string
+	ResumeSessionID string
+	graceTimer      *time.Timer
 }
 
 type command interface{ isCommand() }
@@ -53,18 +67,31 @@ type chatMsgCmd struct {
 	msg proto.ChatMsg
 }
 
-func (registerCmd) isCommand()   {}
-func (unregisterCmd) isCommand() {}
-func (countCmd) isCommand()      {}
-func (readyCmd) isCommand()      {}
-func (busyCmd) isCommand()       {}
-func (leaveCmd) isCommand()      {}
-func (chatMsgCmd) isCommand()    {}
+// graceExpiredCmd fires when a paired session's reconnect grace window
+// (ReconnectGraceWindow) times out with no matching resume. It runs the
+// deferred tail of what an immediate unregisterCmd teardown used to do.
+type graceExpiredCmd struct{ s *Session }
+
+func (registerCmd) isCommand()     {}
+func (unregisterCmd) isCommand()   {}
+func (countCmd) isCommand()        {}
+func (readyCmd) isCommand()        {}
+func (busyCmd) isCommand()         {}
+func (leaveCmd) isCommand()        {}
+func (chatMsgCmd) isCommand()      {}
+func (graceExpiredCmd) isCommand() {}
 
 // maxScan bounds how far past the queue head the pairing loop looks for an
 // eligible successor before the head simply waits — the bounded scan AD-8 calls
 // for.
 const maxScan = 64
+
+// ReconnectGraceWindow is how long a paired session's teardown is held open
+// after its socket drops, so a reconnect presenting the same account key and
+// that session's own session_id can resume the pairing with no session_ended
+// sent to the peer. A package var, not a const, so tests can shrink it (mirrors
+// wsclient's sessionEndedCloseGrace / backoffBase).
+var ReconnectGraceWindow = 10 * time.Second
 
 // Hub is the single-writer connection registry. Construct it with New, start its
 // owning goroutine with Run, and interact with it only through Register,
@@ -111,44 +138,133 @@ func (h *Hub) Run(ctx context.Context) {
 			switch cmd := c.(type) {
 			case registerCmd:
 				// A second hello for a live key takes over: the prior session is
-				// displaced and told to end.
+				// displaced and told to end — UNLESS it is a resume: prev is
+				// still holding its grace window and cmd.s names prev's own
+				// session_id, in which case the pairing is repointed onto the
+				// new connection instead of torn down. Only ONE of the
+				// takeover / resume branches below can be taken.
+				resumed := false
 				if prev, ok := sessions[cmd.s.Key]; ok && prev != cmd.s {
-					// Tear the displaced session out of the queue and any pairing
-					// BEFORE closing its evict channel, so the pairing is already
-					// gone by the time the victim's handler is signalled.
-					// teardownPair — the sole cause-agnostic session_ended
-					// emission point — notifies prev's peer here; the victim
-					// itself is told exactly once, by the server Evict case.
-					// Doing the teardown first keeps "pairing deleted before
-					// session_ended" true for takeover as well, and lets the
-					// later unregisterCmd{prev} cleanup simply no-op.
-					p.removeFromQueue(prev)
-					p.teardownPair(prev)
-					close(prev.Evict)
-					// Re-drain: a pair that only becomes formable once prev is
-					// gone should form now. This is the Epic-4 eligibility seam —
-					// with a narrower predicate a departing head can unblock a
-					// waiting pair.
-					p.drainQueue(eligible)
+					if prev.graceTimer != nil && cmd.s.ResumeSessionID != "" &&
+						cmd.s.ResumeSessionID == prev.SessionID {
+						// Resume: stop the pending expiry and repoint the
+						// pairing onto the new connection. No teardownPair, no
+						// drainQueue, no session_id mint — the peer is never
+						// told anything happened.
+						prev.graceTimer.Stop()
+						prev.graceTimer = nil
+						// peer, ok can fail here: prev's live counterpart may
+						// have already left or gone busy while prev was
+						// grace-held (that teardown deletes both p.pairings
+						// entries but has no reason to touch prev's timer).
+						// resumed must track that: on failure this falls
+						// through to the !resumed tail below, which delivers
+						// cmd.s the session_ended its actually-ended session
+						// earned, instead of silently registering it as
+						// resumed with no pairing to show for it. prev itself
+						// needs no further cleanup — the unconditional
+						// `sessions[cmd.s.Key] = cmd.s` below already retires
+						// it from the registry either way.
+						if peer, ok := p.pairings[prev]; ok {
+							delete(p.pairings, prev)
+							p.pairings[cmd.s] = peer
+							p.pairings[peer] = cmd.s
+							cmd.s.SessionID = prev.SessionID
+							resumed = true
+						}
+					} else {
+						// Not a valid resume: takeover. Tear the displaced
+						// session out of the queue and any pairing BEFORE
+						// closing its evict channel, so the pairing is already
+						// gone by the time the victim's handler is signalled.
+						// teardownPair — the sole cause-agnostic session_ended
+						// emission point — notifies prev's peer here; the
+						// victim itself is told exactly once, by the server
+						// Evict case. Doing the teardown first keeps "pairing
+						// deleted before session_ended" true for takeover as
+						// well, and lets the later unregisterCmd{prev} cleanup
+						// simply no-op. A still-running grace timer (a stale
+						// or expired resume attempt racing the timeout) is
+						// stopped so it cannot fire graceExpiredCmd for a
+						// session that is about to be torn down here anyway.
+						if prev.graceTimer != nil {
+							prev.graceTimer.Stop()
+							prev.graceTimer = nil
+						}
+						p.removeFromQueue(prev)
+						p.teardownPair(prev)
+						close(prev.Evict)
+						// Re-drain: a pair that only becomes formable once prev
+						// is gone should form now. This is the Epic-4
+						// eligibility seam — with a narrower predicate a
+						// departing head can unblock a waiting pair.
+						p.drainQueue(eligible)
+					}
+				}
+				if !resumed && cmd.s.ResumeSessionID != "" {
+					// This Hello named a session_id it wanted back and it did
+					// not resolve to a resume — either nothing was held for
+					// this key at all (wrong id, or the hold already expired),
+					// or something was held but under a different id (the
+					// takeover branch above just tore it down). Either way,
+					// tell this new connection its named session ended, on its
+					// own Outbound, so a stale local pane resets via the
+					// existing cause-agnostic frame. No companion branching —
+					// client.SessionEnded() already handles this.
+					deliver(cmd.s, proto.SessionEnded{})
 				}
 				sessions[cmd.s.Key] = cmd.s
 			case unregisterCmd:
-				// Remove only if the map still points at this exact session, so a
-				// stale Unregister from a connection that was already taken over
-				// cannot evict its replacement.
-				if cur, ok := sessions[cmd.s.Key]; ok && cur == cmd.s {
-					delete(sessions, cmd.s.Key)
+				cur, curOK := sessions[cmd.s.Key]
+				_, paired := p.pairings[cmd.s]
+				if curOK && cur == cmd.s && paired {
+					// A disconnect while currently registered AND currently
+					// paired is held open for the reconnect grace window
+					// instead of torn down immediately: arm a timer and leave
+					// sessions[key] and both p.pairings entries completely
+					// untouched for the whole window. A resume (registerCmd)
+					// repoints them; a timeout (graceExpiredCmd) runs the same
+					// teardownPair the immediate path below already uses.
+					s := cmd.s
+					s.graceTimer = time.AfterFunc(ReconnectGraceWindow, func() {
+						h.send(graceExpiredCmd{s: s})
+					})
+				} else {
+					// Every other case — a stale Unregister from a connection
+					// already taken over, or a session that was queued or idle
+					// (not paired) at disconnect — is the unchanged immediate
+					// cleanup: silent queue removal, and a paired teardown
+					// (nothing to do here since paired is false) if somehow
+					// still paired under a stale pointer.
+					if curOK && cur == cmd.s {
+						// Remove only if the map still points at this exact
+						// session, so a stale Unregister from a connection that
+						// was already taken over cannot evict its replacement.
+						delete(sessions, cmd.s.Key)
+					}
+					p.removeFromQueue(cmd.s)
+					p.teardownPair(cmd.s)
+					// Re-drain in case the departure unblocks a waiting pair.
+					// This is the Epic-4 eligibility seam — under a narrower
+					// predicate a blocking head leaving can free the sessions
+					// behind it.
+					p.drainQueue(eligible)
 				}
-				// A disconnect or takeover also drops the session from the queue
-				// (silently) and tears down any pairing (the surviving peer gets
-				// a bare session_ended). Both act on the session pointer, so a
-				// stale Unregister still cleans up its own queue / pairing entry.
-				p.removeFromQueue(cmd.s)
-				p.teardownPair(cmd.s)
-				// Re-drain in case the departure unblocks a waiting pair. This is
-				// the Epic-4 eligibility seam — under a narrower predicate a
-				// blocking head leaving can free the sessions behind it.
-				p.drainQueue(eligible)
+			case graceExpiredCmd:
+				// Stale if this session was already resumed (graceTimer nil'd
+				// out by a resume) or superseded by a takeover (also nils
+				// graceTimer, and the key no longer maps to cmd.s) between the
+				// timer firing and this command being processed.
+				if cur, ok := sessions[cmd.s.Key]; ok && cur == cmd.s && cmd.s.graceTimer != nil {
+					cmd.s.graceTimer = nil
+					delete(sessions, cmd.s.Key)
+					p.teardownPair(cmd.s)
+					// Re-drain in case the departure unblocks a waiting pair.
+					// This is the Epic-4 eligibility seam — under a narrower
+					// predicate a blocking head leaving can free the sessions
+					// behind it.
+					p.drainQueue(eligible)
+				}
 			case readyCmd:
 				// Enqueue the longest-waiting-first queue, then try to pair. Only
 				// a session that is newly enqueued (not already queued, not
@@ -295,6 +411,8 @@ func (p *pairingState) drainQueue(eligible func(a, b *Session) bool) {
 		p.queue = next
 
 		m := proto.Matched{SessionID: newSessionID(), Opener: p.nextOpener()}
+		head.SessionID = m.SessionID
+		succ.SessionID = m.SessionID
 		deliver(head, m)
 		deliver(succ, m)
 		p.pairings[head] = succ
@@ -352,14 +470,23 @@ func (h *Hub) send(c command) bool {
 }
 
 // Register adds s to the registry. If a different session is already mapped to
-// s.Key, that session's Evict channel is closed (takeover) before s replaces it.
+// s.Key AND that session is being grace-held (Story 3.4) with s.ResumeSessionID
+// naming its session_id, the pairing is repointed onto s instead: no
+// session_ended is sent to anyone. Otherwise a takeover occurs: that session's
+// Evict channel is closed before s replaces it, and if it was grace-held or
+// paired its peer gets a session_ended. A Hello naming a session_id that is not
+// currently held gets one session_ended on its own new connection (s).
 func (h *Hub) Register(s *Session) {
 	h.send(registerCmd{s: s})
 }
 
-// Unregister removes s from the registry, but only if the key still maps to this
-// exact session (a no-op after a takeover replaced it). It always removes s from
-// the wait queue and tears down any pairing s was in.
+// Unregister removes s from the registry, but only if the key still maps to
+// this exact session (a no-op after a takeover replaced it). If s was queued
+// or idle it is cleaned up immediately as before. If s was paired, its
+// teardown is instead held open for ReconnectGraceWindow (Story 3.4) — s stays
+// registered and its pairing stays intact — so a same-key reconnect naming s's
+// session_id can resume it with no session_ended sent; a timeout or a
+// non-matching resume then falls through to the immediate teardown.
 func (h *Hub) Unregister(s *Session) {
 	h.send(unregisterCmd{s: s})
 }

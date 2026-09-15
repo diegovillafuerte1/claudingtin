@@ -111,8 +111,9 @@ type Client struct {
 	chatMsg      chan proto.ChatMsg
 	sessionEnded chan proto.SessionEnded
 
-	mu   sync.Mutex
-	conn *websocket.Conn
+	mu       sync.Mutex
+	conn     *websocket.Conn
+	resumeID string // guarded by mu; see offerResumeID / setResumeID / clearResumeID
 
 	writeMu sync.Mutex
 }
@@ -209,6 +210,7 @@ func (c *Client) Run(ctx context.Context) Result {
 		if err := c.writeFrame(ctx, conn, proto.Hello{
 			AccountKey:      c.accountKey,
 			ProtocolVersion: proto.PROTOCOL_VERSION,
+			SessionID:       c.offerResumeID(),
 		}); err != nil {
 			conn.CloseNow()
 			if ctx.Err() != nil {
@@ -286,6 +288,11 @@ func (c *Client) SendChat(ctx context.Context, m proto.ChatMsg) error {
 // is best-effort. The backend notifies only the peer; it never echoes leave
 // back to the sender.
 func (c *Client) SendLeave(ctx context.Context) error {
+	// The user is explicitly ending this session, so it must never be offered
+	// as a resume target on a future reconnect's Hello — clear before writing,
+	// regardless of whether the write itself succeeds or there is no live
+	// connection at all.
+	c.clearResumeID()
 	c.mu.Lock()
 	conn := c.conn
 	c.mu.Unlock()
@@ -376,6 +383,10 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn) serveResult {
 				default:
 				}
 			case proto.Matched:
+				// Remember this session's id so a future reconnect's Hello can
+				// offer it as a resume request (Story 3.4); cleared the instant
+				// SessionEnded is surfaced or SendLeave runs.
+				c.setResumeID(m.SessionID)
 				// Not terminal: hand it to run.loop and keep serving. The send
 				// is non-blocking — the channel is buffered by one, and if
 				// run.loop has not drained a prior matched yet, dropping this
@@ -403,6 +414,9 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn) serveResult {
 				// server closes the socket next (within the grace), the read
 				// error above turns this into serveSessionEnded.
 				endedAt = time.Now()
+				// The resumed-from session is over (a real end, not a resume) —
+				// forget its id so a future Hello never offers a resume for it.
+				c.clearResumeID()
 				select {
 				case c.sessionEnded <- m:
 				default:
@@ -426,6 +440,34 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn) serveResult {
 func (c *Client) setConn(conn *websocket.Conn) {
 	c.mu.Lock()
 	c.conn = conn
+	c.mu.Unlock()
+}
+
+// offerResumeID returns the session_id to offer on the next Hello: the last
+// proto.Matched.SessionID remembered, or "" for a plain connect or a fresh
+// re-match. Hello.SessionID is omitempty, so an empty return here keeps the
+// wire form unchanged.
+func (c *Client) offerResumeID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resumeID
+}
+
+// setResumeID remembers sid — a fresh proto.Matched.SessionID — as the id to
+// offer on the Hello after any future reconnect, until it is cleared.
+func (c *Client) setResumeID(sid string) {
+	c.mu.Lock()
+	c.resumeID = sid
+	c.mu.Unlock()
+}
+
+// clearResumeID forgets any remembered session_id, so a later Hello omits
+// SessionID and never offers a resume for a session that has already ended
+// (cleared the instant SessionEnded is surfaced) or that the caller is
+// explicitly leaving (cleared before SendLeave writes its frame).
+func (c *Client) clearResumeID() {
+	c.mu.Lock()
+	c.resumeID = ""
 	c.mu.Unlock()
 }
 

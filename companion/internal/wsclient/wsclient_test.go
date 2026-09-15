@@ -283,6 +283,146 @@ func TestReconnectResendsHello(t *testing.T) {
 	firstFrameIsHello(t, s.framesFor(1), "acct-rc")
 }
 
+// TestReconnectAfterMatchedOffersThatSessionID: once the client has seen a
+// proto.Matched, a subsequent reconnect's Hello offers that session_id
+// (Story 3.4's resumeID), so the backend can resume the pairing instead of
+// tearing it down.
+func TestReconnectAfterMatchedOffersThatSessionID(t *testing.T) {
+	shrinkBackoff(t)
+	const sid = "sess-resume-1"
+	s := newWSServerWith(t, func(idx int, conn *websocket.Conn) {
+		if idx != 0 {
+			return // only script the first connection
+		}
+		mb, _ := proto.Encode(proto.Matched{SessionID: sid})
+		_ = conn.Write(context.Background(), websocket.MessageText, mb)
+		_ = conn.Close(websocket.StatusNormalClosure, "") // drop: triggers a reconnect
+	})
+	c := New(Config{URL: s.url(), AccountKey: "acct-resume"})
+	drainEvents(t, c)
+	runClient(t, c)
+
+	select {
+	case <-c.Matched():
+	case <-time.After(3 * time.Second):
+		t.Fatal("no value on Matched()")
+	}
+
+	waitFor(t, "a second connection", func() bool { return s.connCount() >= 2 })
+	waitFor(t, "hello on the second connection", func() bool { return len(s.framesFor(1)) >= 1 })
+
+	frames := s.framesFor(1)
+	hello, ok := frames[0].(proto.Hello)
+	if !ok {
+		t.Fatalf("first frame on reconnect is %T, want proto.Hello", frames[0])
+	}
+	if hello.SessionID != sid {
+		t.Fatalf("reconnect hello.SessionID = %q, want %q", hello.SessionID, sid)
+	}
+}
+
+// TestReconnectAfterSendLeaveOffersNoSessionID: SendLeave clears the
+// remembered session_id immediately, so a reconnect after the leave — even for
+// what had been a matched session — offers no SessionID at all.
+func TestReconnectAfterSendLeaveOffersNoSessionID(t *testing.T) {
+	shrinkBackoff(t)
+	const sid = "sess-to-forget"
+	connCh := make(chan *websocket.Conn, 1)
+	s := newWSServerWith(t, func(idx int, conn *websocket.Conn) {
+		if idx != 0 {
+			return
+		}
+		mb, _ := proto.Encode(proto.Matched{SessionID: sid})
+		_ = conn.Write(context.Background(), websocket.MessageText, mb)
+		connCh <- conn
+	})
+	c := New(Config{URL: s.url(), AccountKey: "acct-leave"})
+	runClient(t, c)
+
+	<-c.Events() // Connected
+
+	select {
+	case <-c.Matched():
+	case <-time.After(3 * time.Second):
+		t.Fatal("no value on Matched()")
+	}
+
+	if err := c.SendLeave(context.Background()); err != nil {
+		t.Fatalf("SendLeave: %v", err)
+	}
+
+	// The connection now drops for an unrelated reason (e.g. a later network
+	// blip) — SendLeave itself does not close the socket.
+	conn := <-connCh
+	_ = conn.Close(websocket.StatusNormalClosure, "")
+
+	waitFor(t, "a second connection", func() bool { return s.connCount() >= 2 })
+	waitFor(t, "hello on the second connection", func() bool { return len(s.framesFor(1)) >= 1 })
+
+	frames := s.framesFor(1)
+	hello, ok := frames[0].(proto.Hello)
+	if !ok {
+		t.Fatalf("first frame on reconnect is %T, want proto.Hello", frames[0])
+	}
+	if hello.SessionID != "" {
+		t.Fatalf("reconnect hello.SessionID = %q, want empty (cleared by SendLeave)", hello.SessionID)
+	}
+}
+
+// TestReconnectAfterSessionEndedOffersNoSessionID: a session_ended surfaced to
+// the caller clears the remembered session_id immediately, so a later drop and
+// reconnect offers no SessionID even though the connection stayed open (and
+// serving continued) for a while after the frame.
+func TestReconnectAfterSessionEndedOffersNoSessionID(t *testing.T) {
+	shrinkBackoff(t)
+	shrinkSessionEndedGrace(t)
+	const sid = "sess-ended"
+	lateDrop := 20 * sessionEndedCloseGrace // well past the grace: an ordinary drop
+	s := newWSServerWith(t, func(idx int, conn *websocket.Conn) {
+		if idx > 0 {
+			return // the reconnect: just accept it
+		}
+		mb, _ := proto.Encode(proto.Matched{SessionID: sid})
+		_ = conn.Write(context.Background(), websocket.MessageText, mb)
+		eb, _ := proto.Encode(proto.SessionEnded{})
+		_ = conn.Write(context.Background(), websocket.MessageText, eb)
+		time.Sleep(lateDrop)
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	})
+	c := New(Config{URL: s.url(), AccountKey: "acct-ended"})
+	drainEvents(t, c)
+	_, res := runClient(t, c)
+
+	select {
+	case <-c.Matched():
+	case <-time.After(3 * time.Second):
+		t.Fatal("no value on Matched()")
+	}
+	select {
+	case <-c.SessionEnded():
+	case <-time.After(3 * time.Second):
+		t.Fatal("no value on SessionEnded()")
+	}
+
+	waitFor(t, "a reconnect after the late drop", func() bool { return s.connCount() >= 2 })
+	waitFor(t, "hello on the second connection", func() bool { return len(s.framesFor(1)) >= 1 })
+
+	frames := s.framesFor(1)
+	hello, ok := frames[0].(proto.Hello)
+	if !ok {
+		t.Fatalf("first frame on reconnect is %T, want proto.Hello", frames[0])
+	}
+	if hello.SessionID != "" {
+		t.Fatalf("reconnect hello.SessionID = %q, want empty (cleared on SessionEnded)", hello.SessionID)
+	}
+
+	select {
+	case r := <-res:
+		t.Fatalf("Run returned %v after a late drop; it must reconnect", r)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestReconnectEmitsReconnectingEvent(t *testing.T) {
 	shrinkBackoff(t)
 	s := newWSServerDropping(t, func(idx int) bool { return idx == 0 })
