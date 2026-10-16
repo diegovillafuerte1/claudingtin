@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mods for the Companion</title>
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --card-bg: #ffffff;
+    --text: #1c1c1a;
+    --text-muted: #5b5b56;
+    --border: #e2e1dc;
+    --accent: #8a5a2e;
+    --accent-soft: #f1e6d8;
+    --verified-bg: #e6f4ea; --verified-fg: #146c2e; --verified-border: #a8d5b3;
+    --medium-bg: #fff3dc;  --medium-fg: #8a5a00;  --medium-border: #f0cf8a;
+    --low-bg: #fdeaea;     --low-fg: #a33a2e;     --low-border: #f2b8b0;
+    --unverified-bg: #f0f0ee; --unverified-fg: #4a4a46; --unverified-border: #c9c9c3;
+    --disputed-bg: #fde8e8; --disputed-fg: #b3261e; --disputed-border: #f3a9a4;
+    --code-bg: #efece4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #171614;
+      --card-bg: #211f1c;
+      --text: #ece9e2;
+      --text-muted: #a8a49a;
+      --border: #39362f;
+      --accent: #d6a360;
+      --accent-soft: #342a1c;
+      --verified-bg: #16301f; --verified-fg: #6fd98c; --verified-border: #2c5a3c;
+      --medium-bg: #3a2c0f; --medium-fg: #e8b94f; --medium-border: #6b5120;
+      --low-bg: #3a1f1c; --low-fg: #f0948a; --low-border: #6e342c;
+      --unverified-bg: #2b2a27; --unverified-fg: #c8c4ba; --unverified-border: #4a473f;
+      --disputed-bg: #3d1a18; --disputed-fg: #ff9d94; --disputed-border: #7a332c;
+      --code-bg: #2a2722;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #171614; --card-bg: #211f1c; --text: #ece9e2; --text-muted: #a8a49a; --border: #39362f;
+    --accent: #d6a360; --accent-soft: #342a1c;
+    --verified-bg: #16301f; --verified-fg: #6fd98c; --verified-border: #2c5a3c;
+    --medium-bg: #3a2c0f; --medium-fg: #e8b94f; --medium-border: #6b5120;
+    --low-bg: #3a1f1c; --low-fg: #f0948a; --low-border: #6e342c;
+    --unverified-bg: #2b2a27; --unverified-fg: #c8c4ba; --unverified-border: #4a473f;
+    --disputed-bg: #3d1a18; --disputed-fg: #ff9d94; --disputed-border: #7a332c;
+    --code-bg: #2a2722;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  a { color: var(--accent); }
+  code {
+    background: var(--code-bg);
+    padding: 0.1em 0.35em;
+    border-radius: 4px;
+    font-size: 0.88em;
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Consolas, monospace;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 20px 64px; }
+  header.top {
+    border-bottom: 1px solid var(--border);
+    padding: 28px 20px 22px;
+    background: var(--card-bg);
+  }
+  header.top .inner { max-width: 980px; margin: 0 auto; }
+  header.top h1 { margin: 0 0 10px; font-size: 1.45rem; line-height: 1.3; text-wrap: balance; }
+  .meta-row { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 0.86rem; color: var(--text-muted); }
+  .meta-row span strong { color: var(--text); font-weight: 600; }
+  .decision-line { margin-top: 12px; font-size: 0.95rem; color: var(--text-muted); }
+
+  nav.toc {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    overflow-x: auto;
+    white-space: nowrap;
+    font-size: 0.86rem;
+  }
+  nav.toc .inner { max-width: 980px; margin: 0 auto; display: flex; gap: 18px; }
+  nav.toc a { text-decoration: none; color: var(--text-muted); padding: 4px 2px; border-bottom: 2px solid transparent; }
+  nav.toc a:hover { color: var(--accent); border-color: var(--accent); }
+
+  section { margin-top: 40px; }
+  h2 { font-size: 1.2rem; border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: 16px; text-wrap: balance; }
+  h3 { font-size: 1rem; margin: 20px 0 8px; }
+
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 22px 24px;
+  }
+  .exec-card { border-left: 4px solid var(--accent); }
+  .exec-card p { margin: 0 0 12px; }
+  .exec-card p:last-child { margin-bottom: 0; }
+  .findings-list { margin: 10px 0 0; padding-left: 20px; }
+  .findings-list li { margin-bottom: 8px; }
+
+  .ledger-strip { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+  .ledger-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    border-radius: 999px; padding: 6px 12px; font-size: 0.82rem; font-weight: 600;
+    border: 1px solid;
+  }
+  .ledger-chip.verified { background: var(--verified-bg); color: var(--verified-fg); border-color: var(--verified-border); }
+  .ledger-chip.disputed { background: var(--disputed-bg); color: var(--disputed-fg); border-color: var(--disputed-border); font-size: 0.9rem; padding: 7px 14px; }
+
+  .badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 2px 7px;
+    border-radius: 5px;
+    border: 1px solid;
+  }
+  .badge-high, .badge-verified { background: var(--verified-bg); color: var(--verified-fg); border-color: var(--verified-border); }
+  .badge-medium { background: var(--medium-bg); color: var(--medium-fg); border-color: var(--medium-border); }
+  .badge-low { background: var(--low-bg); color: var(--low-fg); border-color: var(--low-border); }
+  .badge-unverified { background: var(--unverified-bg); color: var(--unverified-fg); border-color: var(--unverified-border); }
+  .badge-disputed { background: var(--disputed-bg); color: var(--disputed-fg); border-color: var(--disputed-border); }
+
+  .dim-section p { margin: 0 0 14px; }
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 10px 16px;
+    border-radius: 0 8px 8px 0;
+    margin: 14px 0;
+    font-size: 0.95rem;
+  }
+
+  .rec-list { list-style: none; margin: 0; padding: 0; }
+  .rec-list li {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 10px;
+  }
+  .rec-list li .conf { display: block; margin-top: 6px; font-size: 0.85rem; color: var(--text-muted); }
+
+  .oq-list { padding-left: 20px; }
+  .oq-list li { margin-bottom: 12px; }
+  .oq-resolve { color: var(--text-muted); font-size: 0.9rem; }
+
+  details.sources-wrap {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 4px 0;
+  }
+  details.sources-wrap > summary {
+    cursor: pointer;
+    padding: 16px 24px;
+    font-weight: 600;
+    list-style: none;
+  }
+  details.sources-wrap > summary::-webkit-details-marker { display: none; }
+  details.sources-wrap > summary::before { content: "▸ "; }
+  details.sources-wrap[open] > summary::before { content: "▾ "; }
+  .table-scroll { overflow-x: auto; padding: 0 24px 20px; }
+  table.sources { border-collapse: collapse; width: 100%; font-size: 0.86rem; }
+  table.sources th, table.sources td {
+    border-bottom: 1px solid var(--border);
+    padding: 8px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  table.sources th { color: var(--text-muted); font-weight: 600; white-space: nowrap; }
+  table.sources td:first-child { white-space: nowrap; color: var(--text-muted); }
+
+  .staleness-card { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
+  .staleness-date {
+    font-size: 1.4rem; font-weight: 700; color: var(--accent);
+    white-space: nowrap;
+  }
+  .staleness-date + div { color: var(--text-muted); font-size: 0.9rem; }
+
+  footer.page-footer {
+    text-align: center;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: 48px;
+  }
+
+  @media (max-width: 640px) {
+    header.top { padding: 20px 16px; }
+    .wrap { padding: 0 16px 48px; }
+    nav.toc { padding: 8px 16px; }
+    .card, details.sources-wrap > summary { padding: 16px; }
+    .table-scroll { padding: 0 16px 16px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="inner">
+    <h1>Claude Code mods for claudingtin's companion — research briefing</h1>
+    <div class="meta-row">
+      <span><strong>Type:</strong> Technical research</span>
+      <span><strong>Date:</strong> 2026-10-07</span>
+      <span><strong>Effort:</strong> Standard (3 assistants · 8 sources/round · depth 2, plus one targeted round-2 follow-up)</span>
+      <span><strong>Validation:</strong> Normal</span>
+    </div>
+    <div class="decision-line">
+      <strong>Decision this research serves:</strong> Whether/how to restructure claudingtin's companion frontend to use Claude Code's native plugin UI mechanism instead of terminal-multiplexer pane placement (tmux/wezterm/kitty/zellij/iterm2/new-OS-window).
+    </div>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="inner">
+    <a href="#exec">Executive summary</a>
+    <a href="#landscape">Landscape &amp; maturity</a>
+    <a href="#integration">Integration &amp; interoperability</a>
+    <a href="#patterns">Architecture patterns</a>
+    <a href="#implementation">Implementation reality</a>
+    <a href="#cross">Cross-dimension insights</a>
+    <a href="#recs">Recommendations</a>
+    <a href="#oq">Open questions</a>
+    <a href="#sources">Sources</a>
+    <a href="#staleness">Staleness</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+  <section id="exec">
+    <h2>Executive summary</h2>
+    <div class="card exec-card">
+      <p>Claude Code shipped a real, first-party mechanism for exactly this on <strong>October 1, 2026</strong> (v2.1.287) — called <strong>&ldquo;mods.&rdquo;</strong> A mod is a JS/TS plugin that runs inside the Claude Code process for the life of the session, draws persistent interactive UI (a docked pane, a band above the prompt, buttons, inputs, live text) via a <code>ui.render</code> hook, and can do background work between conversational turns via <code>$.clock.every</code>/<code>after</code> timers. This closes a genuine capability gap: nothing like it existed when claudingtin's architecture was designed.</p>
+      <p>But two hard findings argue against restructuring the companion onto it <strong>now</strong>:</p>
+      <ol class="findings-list">
+        <li><strong>No documented native websocket/duplex-socket API.</strong> Mods expose only one-shot <code>$.http.fetch</code> and MCP-server calls for networking. There is a plausible, but unconfirmed, path via <code>$.process.spawn</code> (an async-generator primitive that streams a long-lived child process's output with no documented timeout) to host a helper process holding the real websocket — but the canonical TypeScript type declarations on Anthropic's own GitHub repo don't even list <code>process.spawn</code> yet, and no builder account of anyone actually doing this was found anywhere. claudingtin's core mechanic — an instant, asynchronous &ldquo;you've been matched&rdquo; push while the user's own Claude is still thinking — sits exactly on this unresolved question.</li>
+        <li><strong>The feature is five days old at time of research</strong>, explicitly labeled &ldquo;early access&rdquo; with an API Anthropic says &ldquo;may change between releases without notice,&rdquo; and it already has open, maintainer-acknowledged bugs where mod UI silently fails to render at all on several surfaces (VS Code extension, Remote Control desktop/iOS viewers) within days of launch.</li>
+      </ol>
+      <p><strong>Recommendation:</strong> Do not restructure the companion onto mods today. Prototype the one unresolved question — a mod spawning a long-lived background process that reacts to external async events and redraws UI without polling — as a small throwaway spike, not a production rewrite. Revisit once the API stabilizes past early access and <code>process.spawn</code> either lands in the public <code>.d.ts</code> or gets a documented example. The terminal-multiplexer placement strategy already shipped (Epic 1 Story 1.8) remains the right production architecture for now.</p>
+      <div class="ledger-strip" aria-label="Claims ledger">
+        <span class="ledger-chip disputed">⚠ 1 disputed — process.spawn push vs. poll</span>
+        <span class="ledger-chip verified">✓ feature identity &amp; date</span>
+        <span class="ledger-chip verified">✓ lifecycle model</span>
+        <span class="ledger-chip verified">✓ no websocket API</span>
+        <span class="ledger-chip verified">✓ not sandboxed</span>
+        <span class="ledger-chip verified">✓ cross-surface rendering gaps</span>
+      </div>
+    </div>
+  </section>
+
+  <section id="landscape" class="dim-section">
+    <h2>Landscape &amp; maturity</h2>
+    <div class="card">
+      <p>The official Anthropic feature is <strong>&ldquo;mods&rdquo;</strong> — not &ldquo;plugins&rdquo; generically. A mod is a plugin category with a <code>hooks.json</code> pointing to a JS/TS hooks module; it registers event handlers via <code>register(on)</code>, and one event, <code>ui.render</code>, fires whenever Claude Code is about to draw a &ldquo;render site&rdquo; (<code>Pane</code>, <code>AbovePrompt</code>/band, <code>Spinner</code>, message rows, tool-call rows, the question dialog, status lines) <a href="#src-1">[1]</a><a href="#src-9">[9]</a>.</p>
+      <p>It shipped <strong>October 1, 2026</strong> in Claude Code <strong>v2.1.287</strong> <a href="#src-6">[6]</a><a href="#src-21">[21]</a><a href="#src-22">[22]</a> — requiring that version or later (<code>claude --version</code> to check) <a href="#src-5">[5]</a>. At time of this research (2026-10-06/07) it is <strong>five days old</strong>. Anthropic's own GitHub README labels it <strong>&ldquo;early access&rdquo;</strong> and states plainly that &ldquo;the API these mods are written against may change between releases without notice&rdquo;; the official docs independently echo this, telling readers to &ldquo;trust these [generated type] files over any page, this one included, when they disagree&rdquo; <a href="#src-7">[7]</a><a href="#src-5">[5]</a>. Two incremental releases already followed within the week — v2.1.288 fixed &ldquo;several mod bugs&rdquo; and added a new API method; v2.1.289 closed permission gaps; v2.1.290 expanded capabilities and fixed a pane redraw bug <a href="#src-6">[6]</a><a href="#src-21">[21]</a>.</p>
+      <p>What this newly makes possible in the CLI specifically: before mods, a plugin could only add slash commands, static text output, tool-call-intercepting hooks, skills, or MCP servers — none of which could draw a persistent, stateful, interactive region of the screen. Mods add a true render-and-event-loop UI system: open a sidebar pane or an above-prompt band, draw buttons/inputs/markdown/raster graphics, receive input via callbacks, redraw on a timer, and persist state across reloads (<code>$.state</code>) or across sessions on disk (<code>$.store</code>, machine-shared, capped at 4&nbsp;MiB) <a href="#src-1">[1]</a><a href="#src-4">[4]</a>. This is explicitly scoped to the Claude Code CLI and the Desktop app's &ldquo;Code&rdquo; tab — the docs never mention claude.ai web &ldquo;artifacts,&rdquo; which are an unrelated, separate rendering system <a href="#src-1">[1]</a>.</p>
+      <div class="callout"><strong>Caveat on sourcing:</strong> the exact October 1 date and version number are corroborated independently by Anthropic's own GitHub release notes, two independent third-party technical blogs, and a social-media post — strong agreement across unrelated publishers <a href="#src-6">[6]</a><a href="#src-9">[9]</a><a href="#src-21">[21]</a><a href="#src-22">[22]</a>. One secondary claim — that mods require an opt-in environment variable (<code>CLAUDE_CODE_ENABLE_FUNCTION_HOOKS</code>) — could not be verified against either primary source fetched and is flagged as an unverified belief, not reported as fact. <span class="badge badge-unverified">UNVERIFIED</span></div>
+    </div>
+  </section>
+
+  <section id="integration" class="dim-section">
+    <h2>Integration &amp; interoperability</h2>
+    <div class="card">
+      <p>A mod draws entirely <strong>in-process</strong> — there is no pty-attach, iframe/webview, or separate-process rendering model. The one escape hatch, <code>Client</code>, is &ldquo;a region drawn by a second file of yours, for animation and pointer input,&rdquo; which gets no mods API and reaches the mod's hooks only by posting data that arrives as a <code>ui.message</code> event <a href="#src-1">[1]</a>.</p>
+      <p><strong>Lifecycle — the one genuinely good fit for claudingtin's needs:</strong> a mod's hooks module &ldquo;runs for the length of a session,&rdquo; not torn down between turns. <code>$.clock.every</code>/<code>$.clock.after</code> let it do work &ldquo;outside any event, so it keeps running between turns and doesn't start one&rdquo; — it can update the UI without a conversational turn via <code>$.ui.status</code>/<code>toast</code>/<code>log</code>, and can even proactively start a turn via <code>$.prompt.submit</code>, which &ldquo;waits until the session is idle.&rdquo; <code>session.start</code> fires once per loaded mod, but <em>not</em> after <code>/clear</code>, <code>/resume</code>, or <code>/branch</code> <a href="#src-1">[1]</a><a href="#src-2">[2]</a><a href="#src-4">[4]</a>. <span class="badge badge-verified">VERIFIED</span></p>
+      <p><strong>Networking — the real gap.</strong> The only documented networking primitive is <code>$.http.fetch</code>, a one-shot request/response call, plus <code>$.mcp.call</code>/<code>connect</code> to an MCP server the plugin's own manifest lists <a href="#src-2">[2]</a><a href="#src-4">[4]</a>. No websocket, SSE, or persistent-socket API is documented anywhere. A targeted round-2 follow-up chased the one plausible workaround — <code>$.process.spawn</code>, described as streaming &ldquo;a long-running command's output&rdquo; and explicitly categorized by the official reference page as an <strong>async-generator hook</strong>, the same category as the model's own streaming <code>turn.step</code> event, with no documented timeout (unlike <code>$.process.run</code>'s 30s default/10min max) <a href="#src-2">[2]</a><a href="#src-4">[4]</a><a href="#src-27">[27]</a>. A third-party changelog aggregator independently corroborates that <code>$.process.spawn</code> is a real, actively-iterated shipped API, not a documentation artifact <a href="#src-29">[29]</a>. That pattern (<code>yield* next(e)</code>) is a genuine push mechanism for <code>turn.step</code>, and the docs group <code>process.spawn</code> identically — suggesting a mod <em>could</em> be woken the instant a long-lived child process produces new output, rather than only polling it on a timer. <span class="badge badge-verified">VERIFIED</span></p>
+      <div class="callout">
+        <strong>But this is not confirmed.</strong> <span class="badge badge-disputed">DISPUTED</span><br>
+        The canonical TypeScript type declarations on Anthropic's own <code>main</code> branch — the one source the docs themselves call authoritative when it disagrees with prose — <strong>contain no <code>process.spawn</code> entry at all</strong>, only <code>process.run</code>; a full-text grep across all 13,186 lines found nothing <a href="#src-28">[28]</a>. One independent builder, investigating the exact same question for an unrelated project, confirmed only the negative half: &ldquo;A mod cannot listen on a port or socket. It only has outbound calls&hellip; <code>$.process.spawn</code>, which streams a child's stdout&rdquo; — without reporting whether that streaming is push-based in practice <a href="#src-30">[30]</a>. No firsthand account of anyone actually running a long-lived background process inside a mod and observing real-time event delivery was found anywhere.
+      </div>
+      <p>Permissions: a mod is <strong>not sandboxed</strong> and runs with the full permissions of the user running Claude Code — file system, process, and network access are gated only by the <code>$</code> namespace API surface, not by an isolation boundary; a process a mod spawns runs <em>outside</em> Claude Code's own sandboxing feature even when that feature is otherwise enabled <a href="#src-1">[1]</a><a href="#src-3">[3]</a><a href="#src-4">[4]</a>. A mod can also approve a tool call before the user is asked, and bypass some deny rules under documented admin conditions. <span class="badge badge-verified">VERIFIED</span></p>
+    </div>
+  </section>
+
+  <section id="patterns" class="dim-section">
+    <h2>Architecture patterns in practice</h2>
+    <div class="card">
+      <p>Concrete examples exist but the ecosystem is thin and mostly secondhand, as expected five days post-launch. Anthropic's own first examples are <strong>&ldquo;Token Weather&rdquo;</strong> (a <code>Pane</code>/<code>AbovePrompt</code> status surface driven by <code>tool.call</code> hooks) and <strong>&ldquo;You Should Know&rdquo;</strong> (a monitoring agent that surfaces alerts about overlooked information) <a href="#src-9">[9]</a><a href="#src-10">[10]</a> — neither independently confirmed against its own repo. The most detailed community account found is <strong>ruview-live</strong>, a tabbed Wi-Fi sensor dashboard built as a real Mods application <a href="#src-10">[10]</a>. <span class="badge badge-medium">MEDIUM</span></p>
+      <p>Community-converged patterns: use <code>AbovePrompt</code> as the first UI target since nothing draws there by default; multiple mods can compose output in that band via <code>await next(e)</code> middleware chaining <a href="#src-10">[10]</a><a href="#src-14">[14]</a>. Reported gotchas, all from a single detailed builder field-guide (medium confidence, uncorroborated elsewhere): module-level JS variables reset on every hot reload, so timers and state must live in <code>$.state</code>; a pane only docks full-height on terminals ≥110 columns, otherwise falling back to a cramped inline mode that can clip content; opening a pane does not by itself grant keyboard focus — <code>focus</code>, <code>closeOnEscape</code>, and <code>holdToasts</code> must be set together, with hotkeys mirrored as slash-command fallbacks <a href="#src-10">[10]</a>.</p>
+      <div class="callout">
+        <strong>The cross-surface rendering gap is the most load-bearing finding in this section</strong> <span class="badge badge-verified">VERIFIED</span> — it is not a blog claim but a primary source: Anthropic's own issue tracker already has open, specific bug reports — filed within days of launch — that mod UI (<code>Pane</code>/<code>AbovePrompt</code>) renders correctly in the local terminal but <strong>does not appear at all</strong> when the same session is viewed through Remote Control on the Claude desktop or iOS apps (#99217), and the VS Code extension's chat panel draws <strong>no mod UI at all</strong> — confirmed by a maintainer's own code inspection finding zero render-event handlers in that extension (#99045, #99423) <a href="#src-11">[11]</a><a href="#src-23">[23]</a><a href="#src-24">[24]</a>. A further open feature request confirms mods cannot yet embed an arbitrary web page/iframe (<code>WebView</code>) — the element set is a closed, Anthropic-defined list <a href="#src-25">[25]</a>.
+      </div>
+      <p>As a contrast case: several well-known community &ldquo;Claude Code dashboards&rdquo; already exist but are explicitly <strong>not</strong> rendered in-session — they're separate web servers reading Claude Code's local log files, served to their own browser UI. That is architecturally the same &ldquo;separate process&rdquo; pattern claudingtin uses today via tmux; it is evidence of what builders reach for when they need something mods doesn't yet do well, not an example of the native mechanism <a href="#src-15">[15]</a><a href="#src-16">[16]</a><a href="#src-17">[17]</a>.</p>
+    </div>
+  </section>
+
+  <section id="implementation" class="dim-section">
+    <h2>Implementation reality</h2>
+    <div class="card">
+      <p>No separate SDK is required beyond a plugin directory (<code>plugin.json</code>, <code>hooks/hooks.json</code>, a JS/TS module); the dev loop is <code>claude --plugin-dir</code> for hot reload, <code>claude plugin validate</code>, and <code>claude plugin test</code> <a href="#src-2">[2]</a><a href="#src-4">[4]</a>.</p>
+      <p><strong>Cross-platform support is uneven by design, not by bug</strong>, per Anthropic's own &ldquo;Where mods run&rdquo; table: full rendering only in the CLI terminal and the Desktop app's Code tab; hooks run but <strong>nothing draws</strong> in the VS Code extension's chat panel, <code>claude -p</code>, the Agent SDK, or cloud sessions; mods don't load at all in WSL sessions in the Desktop app <a href="#src-3">[3]</a>. This is compounded by the open bugs already noted above showing even the <em>documented</em> surfaces aren't fully reliable yet. <span class="badge badge-verified">VERIFIED</span></p>
+      <p><strong>Throughput limits relevant to a live chat-style UI:</strong> <code>$.ui.invalidate('ui.render')</code> is throttled to 10/sec generally, 30/sec in the terminal for the visible pane/band; a hook's own synchronous execution is capped at 10 seconds (50ms for the <code>prompt.edit</code> event specifically) — any live/streaming logic has to live in a background timer or process, never inline in the hook call <a href="#src-4">[4]</a>. One builder reports a separate <code>$.ui.blit</code> animation path supporting up to 120 frames/sec for pure redraw, distinct from state invalidation <a href="#src-10">[10]</a>.</p>
+      <p>A prior Anthropic GitHub feature request from <strong>April 2026</strong> — &ldquo;Plugin API for custom animated UI components&rdquo; — sat open and was closed as <em>not planned</em> only months before mods shipped <a href="#src-26">[26]</a>. This confirms mods are a genuinely new capability, not the maturation of something long-promised; there is correspondingly no multi-year track record to draw on.</p>
+    </div>
+  </section>
+
+  <section id="cross">
+    <h2>Cross-dimension insights</h2>
+    <div class="card">
+      <ul class="findings-list">
+        <li><strong>The maturity finding and the networking finding compound each other.</strong> A five-day-old, explicitly-unstable API would already argue for caution on its own; that the one capability claudingtin's architecture most needs — a background process reacting to an async network event — sits on the single most <em>under-documented</em> corner of that API is a second, independent reason for the same caution, not a repeat of the first.</li>
+        <li><strong>The cross-surface rendering gaps reframe what &ldquo;restructure the frontend&rdquo; would even mean.</strong> claudingtin's companion today works identically regardless of which terminal/emulator hosts the pane. Moving to mods would, as of this research, make the chat surface <em>invisible</em> the moment a user views their session through VS Code, Remote Control, or claude -p/Agent SDK/cloud sessions — a regression in reach, not just a risk to validate.</li>
+        <li><strong>The permission-model finding changes the risk profile of the rewrite itself, independent of whether it technically works.</strong> Today's companion is a separate OS process the user can inspect, kill, or sandbox independently of Claude Code. A mod runs <em>inside</em> Claude Code with the user's full permissions and no isolation — folding the companion into a mod would mean a crash, infinite loop, or bug in companion code can now directly affect the host Claude Code session's stability and trust boundary.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="recs">
+    <h2>Recommendations</h2>
+    <ul class="rec-list">
+      <li><strong>Do not restructure claudingtin's companion onto mods now.</strong>
+        <span class="conf">Confidence: high — rests on two independently-corroborated findings (maturity/stability, no documented websocket) that hold regardless of how the one disputed claim eventually resolves.</span>
+      </li>
+      <li><strong>Run a small, explicitly throwaway spike — not a production branch — to resolve the one open question:</strong> have a mod call <code>$.process.spawn</code> on a tiny helper binary that holds a real persistent connection and confirm empirically whether new output wakes the mod immediately or only on the next <code>$.clock.every</code> tick. This is cheap (a day, not a sprint) and is the single piece of evidence that would most change this recommendation.
+        <span class="conf">Confidence basis: this exact gap is the one claim in the ledger marked <strong>disputed</strong>, not verified.</span>
+      </li>
+      <li><strong>Keep the existing terminal-multiplexer placement architecture (Epic 1 Story 1.8, the <code>windowterm.go</code>/mux-strategy registry) as the production path for the foreseeable future.</strong> It already works uniformly across every surface a user might view a session from; mods currently do not.
+        <span class="conf">Feeds: architecture spine — an operational constraint to record there if mods work is scheduled into a near-term roadmap.</span>
+      </li>
+      <li><strong>If the spike confirms push-based background delivery, treat a mods-based UI as a parallel, additive surface first</strong> (e.g. a lightweight &ldquo;searching&hellip;/matched&rdquo; status indicator in <code>AbovePrompt</code>), not a replacement for the full chat relay — given the documented cross-surface gaps, shipping only on mods today would mean the product silently stops working for any user who ever views their session from VS Code, mobile Remote Control, or a cloud/headless run.</li>
+      <li><strong>Set a revisit trigger, not a calendar date:</strong> re-evaluate once mods drop &ldquo;early access&rdquo; status, or once <code>process.spawn</code> appears in the canonical <code>claude-code.d.ts</code> with a documented type, whichever comes first — both are concrete, checkable signals rather than a guessed timeline.</li>
+    </ul>
+  </section>
+
+  <section id="oq">
+    <h2>Open questions</h2>
+    <ol class="oq-list">
+      <li><strong>Does <code>$.process.spawn</code> deliver output to a mod as a true push (wakes the hook the instant new data arrives) or only via polling a buffer?</strong> The official docs' own categorization suggests push; the canonical type declarations omit the method entirely; no firsthand builder account was found either way.
+        <div class="oq-resolve">What would resolve it: the spike above, or Anthropic shipping the type and a documented example.</div>
+      </li>
+      <li><strong>What exactly happens to a mod's open pane across a full <code>claude</code> process exit and restart</strong> (as opposed to <code>/clear</code>/<code>/resume</code>/<code>/branch</code>, which are documented)? Inferred from session-lifecycle docs but not directly stated.
+        <div class="oq-resolve">What would resolve it: a direct test, or a docs clarification.</div>
+      </li>
+      <li><strong>Is there any roadmap signal for a native websocket/push-socket primitive, or for WebView/iframe support?</strong> An open feature request exists for the latter (#99213) but had no visible Anthropic response at time of access.
+        <div class="oq-resolve">What would resolve it: watching that issue, or Anthropic's own changelog.</div>
+      </li>
+    </ol>
+  </section>
+
+  <section id="sources">
+    <h2>Source appendix</h2>
+    <details class="sources-wrap">
+      <summary>24 sources — click to expand</summary>
+      <div class="table-scroll">
+        <table class="sources"><thead><tr><th>#</th><th>Claim(s) supported</th><th>Publisher</th><th>Pub. date</th><th>Accessed</th><th>Confidence</th></tr></thead><tbody><tr id="src-1"><td>[1]</td><td><a href="https://code.claude.com/docs/en/plugins/mods/interface" target="_blank" rel="noopener">Draw in the interface with a mod</a> — feature identity, element/API surface, lifecycle, CLI-vs-other-surface scoping</td><td>Anthropic (official docs)</td><td>undated/current, v2.1.290</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span></td></tr><tr id="src-2"><td>[2]</td><td><a href="https://code.claude.com/docs/en/plugins/mods/api" target="_blank" rel="noopener">Use the mods API</a> — `$.process.run`/`spawn`, `$.clock`, networking primitives</td><td>Anthropic (official docs)</td><td>undated/current</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span></td></tr><tr id="src-3"><td>[3]</td><td><a href="https://code.claude.com/docs/en/plugins/mods/overview" target="_blank" rel="noopener">Mods overview</a> — &quot;where mods run&quot; table, sandboxing/trust posture</td><td>Anthropic (official docs)</td><td>undated/current</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span></td></tr><tr id="src-4"><td>[4]</td><td><a href="https://code.claude.com/docs/en/plugins/mods/reference" target="_blank" rel="noopener">Mods reference</a> — limits table, event groupings, element set</td><td>Anthropic (official docs)</td><td>undated/current</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span></td></tr><tr id="src-5"><td>[5]</td><td><a href="https://code.claude.com/docs/en/plugins/mods/create" target="_blank" rel="noopener">Create a mod</a> — version requirement, trust/permission gating</td><td>Anthropic (official docs)</td><td>undated/current</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span></td></tr><tr id="src-6"><td>[6]</td><td><a href="https://github.com/anthropics/claude-code/releases" target="_blank" rel="noopener">anthropics/claude-code releases</a> — v2.1.287/288/289/290 shipped dates and changes</td><td>Anthropic (GitHub)</td><td>2026-10-01 to 2026-10-05</td><td>2026-10-06</td><td><span class="badge badge-medium">MEDIUM</span> (one year-rendering inconsistency via summarizer, resolved by cross-source corroboration)</td></tr><tr id="src-7"><td>[7]</td><td><a href="https://github.com/anthropics/claude-code/tree/main/mods" target="_blank" rel="noopener">anthropics/claude-code mods README</a> — &quot;early access&quot; labeling</td><td>Anthropic (GitHub)</td><td>current</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span></td></tr><tr id="src-9"><td>[9]</td><td><a href="https://the-decoder.com/claude-codes-new-mods-system-lets-developers-rewrite-the-ai-coding-tool-from-the-inside" target="_blank" rel="noopener">The Decoder: Claude Code&#x27;s new Mods system</a> — independent corroboration of feature, examples, sandboxing posture</td><td>the-decoder.com (independent tech press)</td><td>~Oct 2026</td><td>2026-10-06</td><td><span class="badge badge-medium">MEDIUM</span></td></tr><tr id="src-10"><td>[10]</td><td><a href="https://gist.github.com/ruvnet/a485e930b148185197fc53fd38b429ea" target="_blank" rel="noopener">Community field-guide gist (ruvnet)</a> — builder patterns, gotchas, ruview-live example</td><td>independent builder</td><td>undated, recent</td><td>2026-10-06</td><td><span class="badge badge-medium">MEDIUM</span></td></tr><tr id="src-11"><td>[11]</td><td><a href="https://github.com/anthropics/claude-code/issues/99217" target="_blank" rel="noopener">anthropics/claude-code issue #99217</a> — Remote Control rendering gap</td><td>Anthropic GitHub issue tracker (primary, user-filed)</td><td>~Oct 2026</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span></td></tr><tr id="src-14"><td>[14]</td><td><a href="https://github.com/Anerco/claude-code-effort-cycle/issues/2" target="_blank" rel="noopener">Anerco/claude-code-effort-cycle issue #2</a> — AbovePrompt composition pattern</td><td>independent GitHub repo</td><td>recent</td><td>2026-10-06</td><td><span class="badge badge-medium">MEDIUM</span></td></tr><tr id="src-15"><td>[15]</td><td><a href="https://github.com/developer-hasm/claude-code-dashboard" target="_blank" rel="noopener">developer-hasm/claude-code-dashboard</a> — contrast case, separate-process dashboard</td><td>independent maintainer</td><td>recent</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span></td></tr><tr id="src-16"><td>[16]</td><td><a href="https://github.com/hoangsonww/Claude-Code-Agent-Monitor" target="_blank" rel="noopener">hoangsonww/Claude-Code-Agent-Monitor</a> — contrast case</td><td>independent maintainer</td><td>recent</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span></td></tr><tr id="src-17"><td>[17]</td><td><a href="https://github.com/netil/oh-my-hi" target="_blank" rel="noopener">netil/oh-my-hi</a> — contrast case</td><td>independent maintainer</td><td>recent</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span></td></tr><tr id="src-21"><td>[21]</td><td><a href="https://blogs.eagentix.com/2026/10/02/claude-code-mods-what-changed-who-it-affects-how-to/" target="_blank" rel="noopener">eagentix blog</a> — independent corroboration of launch date/version</td><td>blogs.eagentix.com (independent)</td><td>2026-10-02</td><td>2026-10-06</td><td><span class="badge badge-medium">MEDIUM</span></td></tr><tr id="src-22"><td>[22]</td><td><a href="https://superpowerdaily.com/posts/anthropic-adds-claude-code-mods-that-can-rewrite-prompts-and-replace-built-in-features" target="_blank" rel="noopener">Superpower Daily</a> — independent corroboration</td><td>superpowerdaily.com (independent)</td><td>~Oct 2026</td><td>2026-10-06</td><td><span class="badge badge-medium">MEDIUM</span></td></tr><tr id="src-23"><td>[23]</td><td><a href="https://github.com/anthropics/claude-code/issues/99045" target="_blank" rel="noopener">anthropics/claude-code issue #99045</a> — VS Code extension draws no mod UI</td><td>Anthropic GitHub issue tracker</td><td>~Oct 2026</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span></td></tr><tr id="src-24"><td>[24]</td><td><a href="https://github.com/anthropics/claude-code/issues/99423" target="_blank" rel="noopener">anthropics/claude-code issue #99423</a> — VS Code extension, corroborating</td><td>Anthropic GitHub issue tracker</td><td>~Oct 2026</td><td>2026-10-06</td><td><span class="badge badge-medium">MEDIUM</span></td></tr><tr id="src-25"><td>[25]</td><td><a href="https://github.com/anthropics/claude-code/issues/99213" target="_blank" rel="noopener">anthropics/claude-code issue #99213</a> — WebView/iframe not supported</td><td>Anthropic GitHub issue tracker</td><td>~Oct 2026</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span></td></tr><tr id="src-26"><td>[26]</td><td><a href="https://github.com/anthropics/claude-code/issues/52235" target="_blank" rel="noopener">anthropics/claude-code issue #52235</a> — closed-not-planned, pre-mods history</td><td>Anthropic GitHub issue tracker</td><td>opened 2026-04-23</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span></td></tr><tr id="src-27"><td>[27]</td><td><a href="https://code.claude.com/docs/en/plugins/mods/events" target="_blank" rel="noopener">Mods events guide</a> — async-generator pattern for streaming hooks</td><td>Anthropic (official docs)</td><td>undated/current</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span></td></tr><tr id="src-28"><td>[28]</td><td><a href="https://raw.githubusercontent.com/anthropics/claude-code/main/mods/types/claude-code.d.ts" target="_blank" rel="noopener">claude-code.d.ts (main, raw)</a> — canonical type declarations, `process.spawn` absent</td><td>Anthropic (GitHub, primary)</td><td>last touched pre-2026-10-01</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span> (on the observation itself)</td></tr><tr id="src-29"><td>[29]</td><td><a href="https://www.gradually.ai/en/changelogs/claude-code/" target="_blank" rel="noopener">gradually.ai changelog aggregator</a> — `$.process.spawn` iteration corroboration</td><td>gradually.ai (secondary aggregator)</td><td>current</td><td>2026-10-06</td><td><span class="badge badge-medium">MEDIUM</span></td></tr><tr id="src-30"><td>[30]</td><td><a href="https://github.com/sleeyax/paseo-plugins/issues/111" target="_blank" rel="noopener">sleeyax/paseo-plugins issue #111</a> — independent builder confirming no inbound socket</td><td>independent builder (sleeyax)</td><td>2026-10-03</td><td>2026-10-06</td><td><span class="badge badge-high">HIGH</span> (on the quoted constraint)</td></tr></tbody></table>
+      </div>
+    </details>
+  </section>
+
+  <section id="staleness">
+    <h2>Staleness map</h2>
+    <div class="card staleness-card">
+      <div class="staleness-date">2026-11-01</div>
+      <div>
+        <strong>Earliest re-check date.</strong> All six ledger claims are freshly dated (2026-10) with no stale entries yet. Given this feature's &ldquo;early access, changes without notice&rdquo; status, five of six claim classes were conservatively windowed at <strong>1 month</strong> rather than a settled-landscape default; the cross-platform/rendering-gap class was windowed at 6 months.
+        <br><br>
+        Before 2026-11-01, re-verify in priority order: (1) whether <code>process.spawn</code> has landed in the public type declarations, (2) whether mods has dropped &ldquo;early access,&rdquo; (3) whether the VS&nbsp;Code/Remote&nbsp;Control rendering gaps have closed.
+      </div>
+    </div>
+  </section>
+
+  <footer class="page-footer">
+    Generated by bmad-deep-recon · native run · technical pack · claudingtin · 2026-10-07<br>
+    Full markdown report and memlog live alongside this file in the same research run folder.
+  </footer>
+
+</div>
+</body>
+</html>

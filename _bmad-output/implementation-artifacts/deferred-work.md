@@ -256,3 +256,23 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-3-5-silent-re-enqueue-while-busy.md`
   summary: `wsclient.go`'s non-blocking, buffered-by-one sends for `matched`/`session_ended` (`select { case ch <- m: default: }`) silently drop a second frame of the same type if `run.loop` hasn't drained the first yet. Pre-existing design tradeoff, unrelated to any file this story touched, but Story 3.5's re-enqueue increases how often `matched`/`session_ended` churn for one connection, raising how often this could matter.
   evidence: edge-case-hunter. No reproduction attempted; flagged as a pre-existing characteristic worth keeping in mind rather than a new defect.
+
+- source_spec: none
+  summary: Remove terminal-multiplexer pane placement (`plugin/cmd/session-start` tmux/windowterm/placement/spawn and the companion-launching SessionStart hook) as part of the mods pivot.
+  evidence: Split from the mods-skeleton intent (2026-10-16). Independently shippable, but removing it before the mod chat surface exists leaves claudingtin with no chat UI; land it together with the mod chat slice.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-mods-skeleton.md`
+  summary: CI never runs `claude plugin validate plugin` or `claude plugin test plugin`, so the mod's tests and manifest wiring can regress on main while CI stays green.
+  evidence: verification-gap reviewer read `.github/workflows/ci.yml` in full, and it has no TS/mod step. The spec ruled out CI changes for the skeleton.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-mods-skeleton.md`
+  summary: No test asserts that `hooks.json` lists `modules: ["./register.tsx"]` (and that the file exists), or that the `plugin.json` `userConfig.backendUrl.default` matches the in-code `DEFAULT_BACKEND_URL`.
+  evidence: verification-gap + blind-hunter. `plugin/cmd/session-start/manifest_test.go` checks only name/version/SessionStart. Extending it touches a dir the spec gated behind Ask First.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-mods-skeleton.md`
+  summary: The AbovePrompt band returns only its own `Text` instead of composing with `next(e)`, so another mod's AbovePrompt content is hidden while the band shows.
+  evidence: blind-hunter. Claude Code draws nothing in AbovePrompt by default, so there is no impact today. It matters once claudingtin coexists with other band mods or adds more AbovePrompt UI.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-mods-skeleton.md`
+  summary: While the backend accepts connections but never answers, each 5 s poll abandons another hung `$.http.fetch` after its 4 s timeout, and nothing caps them. The mods `HttpInit` has no timeout/abort field, so they can't be cancelled.
+  evidence: edge-case-hunter + blind-hunter (review iteration 2). Bounded only by the host's own request timeout, which isn't documented. A cap on outstanding fetches risks wedging polling permanently if they never settle, so revisit once the mods API gains an abort signal or a documented host timeout.
