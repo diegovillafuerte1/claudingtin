@@ -305,3 +305,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-7-2-backend-http-long-poll-transport.md`
   summary: A lapsed, unpaired `/v1` handle whose key is then taken by a `/ws` hello is not retired; its next poll re-registers and takes the key back from the `/ws` session.
   evidence: An unpaired lapse is unregistered at once, so the `/ws` Register evicts nothing the pump watches. Only reachable with the companion and the mod on one key at once; it goes away when `/ws` is deleted in Story 7.6.
+- source_spec: `_bmad-output/implementation-artifacts/spec-7-3-account-key-and-first-run-gate-in-the-mod.md`
+  summary: The mod's `configDir` takes `APPDATA` whenever it is set, even on macOS/Linux where Go's `os.UserConfigDir()` ignores it, so a stray `APPDATA` (WSL interop, ported dotfiles) points the mod at a directory the companion never used.
+  evidence: The frozen spec rule is "APPDATA set → %APPDATA%\claudingtin" because the mods API exposes no platform; a fix (e.g. only when `isWindowsPath(APPDATA)`) needs the human to amend that rule. Rare in practice; it costs carry-over of the key and ack, not safety.

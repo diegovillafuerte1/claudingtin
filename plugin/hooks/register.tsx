@@ -1,5 +1,9 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
+import { loadAccountKey } from './identity'
+import { onSafetyClose, openSafety, renderSafety, requireGate } from './safety'
+
+export { requireGate } from './safety'
 
 const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8080'
 const POLL_MS = 5000
@@ -14,6 +18,19 @@ const poller = atom({ plugin: 'claudingtin', key: 'poller' } as const, { gen: 0,
 export function normalizeBaseUrl(raw: unknown): string {
   const s = typeof raw === 'string' ? raw.trim().replace(/\/+$/, '') : ''
   return s === '' ? DEFAULT_BACKEND_URL : s
+}
+
+const USAGE = 'usage: /claudingtin safety  (read the safety note again)'
+
+// On session start: the same check 7.4 makes (requireGate), which offers the
+// pane unless accepted or declined; accepted → warm the key file. Background
+// work; never throws.
+async function startGate($: EngineInterface): Promise<void> {
+  try {
+    if (await requireGate($)) void loadAccountKey($).catch(() => {})
+  } catch {
+    // Fail open: the mod stays inert.
+  }
 }
 
 export const register: Register = (on, options) => {
@@ -89,7 +106,43 @@ export const register: Register = (on, options) => {
     } catch {
       // Fail open: the band simply never draws.
     }
+    try {
+      await $.command.register({
+        name: 'claudingtin',
+        description: 'claudingtin: read the safety note again',
+        argumentHint: 'safety',
+      })
+    } catch {
+      // Fail open: no command this session.
+    }
+    void startGate($)
     return next(e)
+  })
+
+  on('ui.render', { component: 'Pane', requestId: 'claudingtin-safety' }, async ($, e, next) => {
+    try {
+      return renderSafety($, e)
+    } catch {
+      return next(e)
+    }
+  })
+
+  on('ui.close', { id: 'claudingtin-safety' }, async ($, e, next) => {
+    await onSafetyClose($, e.origin).catch(() => {})
+    return next(e)
+  }).catch((_$, e, next) => next(e)) // A failed decline never keeps the pane open.
+
+  on('command.run', { command: 'claudingtin' }, async ($, e) => {
+    try {
+      if (e.args.trim().toLowerCase() === 'safety') {
+        return (await openSafety($, true))
+          ? { text: 'the safety note is up.' }
+          : { text: "couldn't show the safety note here." }
+      }
+    } catch {
+      // Fall through to the usage line.
+    }
+    return { text: USAGE }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
