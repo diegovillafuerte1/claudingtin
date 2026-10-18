@@ -24,8 +24,8 @@ var roundTripSamples = []any{
 	ProfilePut{},
 	ForgetMe{},
 	NotePut{},
-	Heartbeat{},
 	// server -> client
+	Welcome{Handle: "h-3k9QmZ2pXv7Lw0aB"},
 	Queued{},
 	Matched{SessionID: "s-9f8e7d6c5b4a", Pseudonym: "quiet-otter", Blurb: "likes long compiles", Opener: "what are you avoiding right now?"},
 	SessionEnded{},
@@ -48,7 +48,7 @@ var wireNames = map[string]any{
 	TypeProfilePut:   ProfilePut{},
 	TypeForgetMe:     ForgetMe{},
 	TypeNotePut:      NotePut{},
-	TypeHeartbeat:    Heartbeat{},
+	TypeWelcome:      Welcome{},
 	TypeQueued:       Queued{},
 	TypeMatched:      Matched{},
 	TypeSessionEnded: SessionEnded{},
@@ -242,7 +242,8 @@ func TestPayloadFieldTagsAreSnakeCaseAndUnreserved(t *testing.T) {
 			if !tag.MatchString(name) {
 				t.Errorf("%s.%s json tag %q is not snake_case", st.Name(), f.Name, name)
 			}
-			if name == "type" || name == "v" {
+			// "seq" is reserved too: EncodeEvent stamps it onto /v1 events.
+			if name == "type" || name == "v" || name == "seq" {
 				t.Errorf("%s.%s json tag %q collides with an envelope-reserved key", st.Name(), f.Name, name)
 			}
 		}

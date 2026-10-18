@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-01-2026 02:10
-last_updated: 10-17-2026 00:00
+last_updated: 10-18-2026 00:00
 project: claudingtin
 project_key: NOKEY
 tracking_system: file-system
@@ -70,7 +70,7 @@ development_status:
   # E1 -> E2 -> E3 (3-1..3-5) -> E7 -> E3 (3-6, 3-7) -> E4 -> E5 -> E6
   epic-7: in-progress
   7-1-mods-skeleton-backend-status-band: done        # PR #31
-  7-2-backend-http-long-poll-transport: backlog
+  7-2-backend-http-long-poll-transport: review
   7-3-account-key-and-first-run-gate-in-the-mod: backlog
   7-4-think-time-from-turn-events-and-no-surface-no-queue: backlog
   7-5-mod-chat-surface: backlog                      # ships in one PR with 7-6
@@ -202,9 +202,10 @@ action_items:
       3 story alongside session_ended reliability + reconnect-grace resume. Until
       then record the silent-drop-past-32-frame-buffer relay behaviour as an accepted
       v1 deviation. OWNED BY 7-2 (2026-10-17): AD-19 makes queue overflow end the
-      session with session_ended instead of dropping silently."
+      session with session_ended instead of dropping silently. DONE in 7-2 (2026-10-18):
+      /v1 event queue overflow sends leave + one session_ended (spec-7-2)."
     owner: "Diego"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"
   - id: "epic-2-retro-item-12-f3-reconcile-epics-md-fr-coverage-map-qu"
     epic: 2

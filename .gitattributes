@@ -1,0 +1,2 @@
+# Golden wire fixtures are byte-compared by proto tests; never convert line endings.
+proto/testdata/fixtures/*.json text eol=lf
