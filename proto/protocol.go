@@ -1,12 +1,15 @@
-// Package proto is the single source of truth for the claudingtin websocket wire
+// Package proto is the single source of truth for the claudingtin wire
 // contract: the message envelope, the protocol version, and every v1 message
-// shape plus its encode/decode helpers.
+// shape plus its encode/decode helpers. It is transport-neutral: the same
+// messages travel as /ws frames and as /v1 HTTPS request bodies, response
+// bodies and long-poll events.
 //
 // It imports no sibling module and no third-party package — only the Go standard
-// library. The backend and the companion both import it; nothing else defines a
-// message shape.
+// library. The backend imports it; the mod's TypeScript types are checked
+// against the golden fixtures its tests write to testdata/fixtures. Nothing else
+// defines a message shape.
 //
-// Wire format: every frame is a single flat JSON object
+// Wire format: every message is a single flat JSON object
 //
 //	{ "type": <snake_case string>, "v": <int>, ...payload }
 //

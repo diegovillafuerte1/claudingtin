@@ -21,7 +21,7 @@ import (
 // TypeHello is the discriminator for Hello.
 const TypeHello = "hello"
 
-// Hello is the first frame the companion sends after the socket opens. It
+// Hello is the first frame a /ws client sends, and the POST /v1/hello body. It
 // carries the client's protocol version and the account key that is the user's
 // whole identity to the backend. SessionID, when non-empty, names a session
 // this connection wants to resume within the backend's reconnect grace window
@@ -99,13 +99,17 @@ const TypeNotePut = "note_put"
 // later epic.
 type NotePut struct{}
 
-// TypeHeartbeat is the discriminator for Heartbeat.
-const TypeHeartbeat = "heartbeat"
-
-// Heartbeat keeps the connection alive.
-type Heartbeat struct{}
-
 // --- server -> client ---
+
+// TypeWelcome is the discriminator for Welcome.
+const TypeWelcome = "welcome"
+
+// Welcome is the POST /v1/hello response for a supported protocol version. Handle
+// is the opaque, unguessable token every later /v1 request carries in its
+// X-Claudingtin-Handle header; the account key never travels again after hello.
+type Welcome struct {
+	Handle string `json:"handle"`
+}
 
 // TypeQueued is the discriminator for Queued.
 const TypeQueued = "queued"
@@ -169,8 +173,8 @@ type Error struct {
 }
 
 // TypePleaseUpdate is the discriminator for PleaseUpdate. It is its own type,
-// sent once before the socket closes on an unsupported client version — never an
-// Error code.
+// sent on an unsupported client version (before the /ws socket closes, or as the
+// POST /v1/hello response with no handle minted) — never an Error code.
 const TypePleaseUpdate = "please_update"
 
 // PleaseUpdate tells the client its version is too old to be served.
@@ -195,7 +199,7 @@ var registry = map[string]func() any{
 	TypeProfilePut:   func() any { return new(ProfilePut) },
 	TypeForgetMe:     func() any { return new(ForgetMe) },
 	TypeNotePut:      func() any { return new(NotePut) },
-	TypeHeartbeat:    func() any { return new(Heartbeat) },
+	TypeWelcome:      func() any { return new(Welcome) },
 	TypeQueued:       func() any { return new(Queued) },
 	TypeMatched:      func() any { return new(Matched) },
 	TypeSessionEnded: func() any { return new(SessionEnded) },
@@ -252,6 +256,27 @@ func Encode(msg any) ([]byte, error) {
 	fields["type"] = typeRaw
 	fields["v"] = vRaw
 
+	return json.Marshal(fields)
+}
+
+// EncodeEvent is Encode plus a "seq" field: the flat form of one entry in a
+// GET /v1/events response list,
+//
+//	{ "seq": <int64>, "type": <discriminator>, "v": PROTOCOL_VERSION, ...payload }
+//
+// seq is the handle's monotonic event counter (architecture decision AD-19); the
+// client acknowledges by passing the last seq it processed as ?after=.
+func EncodeEvent(seq int64, msg any) ([]byte, error) {
+	raw, err := Encode(msg)
+	if err != nil {
+		return nil, err
+	}
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	seqRaw, _ := json.Marshal(seq)
+	fields["seq"] = seqRaw
 	return json.Marshal(fields)
 }
 

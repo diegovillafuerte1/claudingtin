@@ -482,7 +482,7 @@ func TestPostHelloFramesDiscardedNotRegisteredTwice(t *testing.T) {
 	// (ready / busy do have meaning now and are covered by the match tests.)
 	writeMsg(t, c, helloFor("acct-chatty", proto.PROTOCOL_VERSION))
 	writeMsg(t, c, proto.ChatMsg{ClientMsgID: "m1", Text: "ignored"})
-	writeMsg(t, c, proto.Heartbeat{})
+	writeRaw(t, c, `{"type":"heartbeat","v":1}`) // removed from proto in Story 7.2; still ignored
 	writeRaw(t, c, `{"type":`)
 	writeBinary(t, c, []byte{0x00, 0x01, 0x02, 0xff})
 

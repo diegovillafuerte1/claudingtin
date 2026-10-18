@@ -1,9 +1,11 @@
-// Package server is the backend's HTTP surface: the websocket upgrade at /ws and
-// GET /status. It owns no connection state — that lives in package hub — and it
-// speaks nothing on the wire that is not a proto message.
+// Package server is the backend's HTTP surface: the websocket upgrade at /ws,
+// the /v1 HTTPS long-poll transport (POST /v1/hello, GET /v1/events, POST
+// /v1/send — see v1.go), and GET /status. Queue and pairing state live in
+// package hub; this package holds only transport state (the /v1 handles), and
+// it speaks nothing on the wire that is not a proto message.
 //
-// The only two routes that exist are /ws and /status. Every other path is 404;
-// a non-GET /status is 405 (architecture decision AD-13). Once a websocket is
+// Those five routes are the only ones. Every other path is 404; a route hit
+// with the wrong method is 405 (architecture decision AD-13). Once a websocket is
 // open, a client-facing failure is a proto error frame, never a transport close
 // code — the one exception is the AD-5 please_update flow, which is its own
 // frame followed by a normal close.
@@ -48,6 +50,7 @@ func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/status", s.handleStatus)
+	newV1API(s.hub, s.logger, defaultV1Config()).register(mux)
 	mux.HandleFunc("/", s.handleFallback)
 	return mux
 }

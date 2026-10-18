@@ -298,3 +298,10 @@
 - No manifest test for `modules` / `userConfig` default → Story 7.6.
 - AbovePrompt band doesn't compose with `next(e)` → Story 7.5.
 - Uncapped abandoned hung `$.http.fetch` calls → Story 7.4 (long-poll client: one events poll in flight, client-side abandon > server hold).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-7-2-backend-http-long-poll-transport.md`
+  summary: Graceful shutdown does not wake held `/v1/events` polls, so `http.Server.Shutdown` waits up to the 20s poll hold (past the 10s shutdownTimeout) and lease/GC timers are not drained.
+  evidence: `newV1API` is built inside `routes()` with no Close hook; `Shutdown` does not cancel request contexts. Harmless today (the process exits after the timeout), but a deploy restart drops every held poll uncleanly. Fix with `srv.RegisterOnShutdown` waking all handles, or a v1API shutdown channel in the poll select.
+- source_spec: `_bmad-output/implementation-artifacts/spec-7-2-backend-http-long-poll-transport.md`
+  summary: A lapsed, unpaired `/v1` handle whose key is then taken by a `/ws` hello is not retired; its next poll re-registers and takes the key back from the `/ws` session.
+  evidence: An unpaired lapse is unregistered at once, so the `/ws` Register evicts nothing the pump watches. Only reachable with the companion and the mod on one key at once; it goes away when `/ws` is deleted in Story 7.6.
