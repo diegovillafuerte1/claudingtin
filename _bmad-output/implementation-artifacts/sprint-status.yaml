@@ -72,7 +72,7 @@ development_status:
   7-1-mods-skeleton-backend-status-band: done        # PR #31
   7-2-backend-http-long-poll-transport: done        # PR #32
   7-3-account-key-and-first-run-gate-in-the-mod: done        # PR #34
-  7-4-think-time-from-turn-events-and-no-surface-no-queue: review
+  7-4-think-time-from-turn-events-and-no-surface-no-queue: done        # PR #36
   7-5-mod-chat-surface: backlog                      # ships in one PR with 7-6
   7-6-remove-the-companion-and-pane-placement: backlog
   epic-7-retrospective: optional
