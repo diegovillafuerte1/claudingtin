@@ -1,6 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 import { loadAccountKey } from './identity'
+import { markDrawn, onTurnEnd, onTurnStart, resume } from './link'
 import { onSafetyClose, openSafety, renderSafety, requireGate } from './safety'
 
 export { requireGate } from './safety'
@@ -116,6 +117,19 @@ export const register: Register = (on, options) => {
       // Fail open: no command this session.
     }
     void startGate($)
+    void resume($, base).catch(() => {})
+    return next(e)
+  })
+
+  // Think-time: only main-loop turns count (agentId absent). The hooks only
+  // record what they want (state, never the network) and return.
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) await onTurnStart($, base).catch(() => {})
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) await onTurnEnd($, base).catch(() => {})
     return next(e)
   })
 
@@ -146,6 +160,8 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    // Asked to draw: the mod's UI reaches this session (half of "no surface, no queue").
+    markDrawn($)
     if (e.props.hasSurvey || e.props.maxRows < 1) return next(e)
     let v: boolean | null
     try {

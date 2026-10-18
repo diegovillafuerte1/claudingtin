@@ -11,6 +11,27 @@ export type Poller = { gen: number; inFlight: boolean }
  */
 export type Gate = { accepted: boolean; declined: boolean }
 
+/** What the mod wants the backend to know, or last told it: in the queue (`ready`) or not (`busy`). */
+export type Presence = 'ready' | 'busy'
+
+/**
+ * The /v1 link. `handle` is the opaque welcome handle (never logged or shown);
+ * `after` the highest event `seq` seen on it; `want` what the turns ask for and
+ * `sent` what the backend was last told; `quiet` after a supersede (an events
+ * poll's 410) or a second 410 on send ready, until the next main-loop
+ * turn.start; `outdated` after please_update (this session);
+ * `gen` names the newest events poll loop. Never holds the account key.
+ */
+export type Link = {
+  handle: string | null
+  after: number
+  want: Presence | null
+  sent: Presence | null
+  quiet: boolean
+  outdated: boolean
+  gen: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     claudingtin: {
@@ -19,6 +40,10 @@ declare module 'claude-code' {
       poller: Poller
       /** The first-run safety gate. Never holds the account key. */
       gate: Gate
+      /** The /v1 link state; kept here so a hot reload resumes on the same handle. */
+      link: Link
+      /** True once the AbovePrompt band hook was asked to render this session. */
+      drawn: boolean
     }
   }
 }

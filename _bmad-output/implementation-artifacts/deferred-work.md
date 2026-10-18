@@ -308,3 +308,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-7-3-account-key-and-first-run-gate-in-the-mod.md`
   summary: The mod's `configDir` takes `APPDATA` whenever it is set, even on macOS/Linux where Go's `os.UserConfigDir()` ignores it, so a stray `APPDATA` (WSL interop, ported dotfiles) points the mod at a directory the companion never used.
   evidence: The frozen spec rule is "APPDATA set → %APPDATA%\claudingtin" because the mods API exposes no platform; a fix (e.g. only when `isWindowsPath(APPDATA)`) needs the human to amend that rule. Rare in practice; it costs carry-over of the key and ack, not safety.
+- source_spec: `_bmad-output/implementation-artifacts/spec-7-4-think-time-from-turn-events-and-no-surface-no-queue.md`
+  summary: `loadAccountKey` (plugin/hooks/identity.ts) shares one in-flight load with no timeout, so a key-file read that never settles keeps every later load (and so every turn's eligibility) waiting for the rest of the session.
+  evidence: 7.4 now abandons `eligible()` at 5 s so the worker is freed, but the shared `inFlight` promise in identity.ts is never released; fixing it means a timeout in identity.ts, outside 7.4's scope.
