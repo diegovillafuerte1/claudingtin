@@ -15,7 +15,9 @@ inputDocuments:
 
 This document provides the complete epic and story breakdown for claudingtin (Claude Think-Time Chat Roulette, v1), decomposing the requirements from the PRD, the Architecture Spine, and the SPEC into implementable stories.
 
-Scope: v1 only — Claude Code plugin + bundled companion TUI + one hosted matching/relay backend. The v2 reconnect webapp is out of scope.
+Scope: v1 only — a Claude Code plugin whose mod draws the chat inside Claude Code and talks to one hosted matching/relay backend over HTTPS. The v2 reconnect webapp is out of scope.
+
+> **Mods pivot (2026-10-17, `sprint-change-proposal-2026-10-17.md`):** the bundled Go companion TUI and pane placement built in Epics 1–3 are superseded by **Epic 7**. Superseded requirements are kept below, marked, as the historical record.
 
 ## Requirements Inventory
 
@@ -23,12 +25,12 @@ Scope: v1 only — Claude Code plugin + bundled companion TUI + one hosted match
 
 **F1 — Think-time detection and session lifecycle**
 
-FR1: The chat surface is a bundled companion process (a small TUI) that the plugin launches on `SessionStart`; it holds the websocket to the backend, renders the chat, and takes the user's input.
-FR2: Think-time boundaries are determined by the companion watching the Claude Code session transcript — burst begins when the user's turn starts, ends when the assistant's response completes. The `UserPromptSubmit` / `Stop` hooks may provide a secondary signal but are not relied on for timing. On burst begin the user is entered into the queue; on burst end the active chat ends, unless persist is enabled.
+FR1: The chat surface is the plugin's mod: it draws inside Claude Code (an AbovePrompt band and a docked Pane), holds the client side of the backend connection over HTTPS, renders the chat and takes the user's input. Nothing runs outside the Claude Code process. _(Amended 2026-10-17; was: a bundled companion TUI launched on `SessionStart` holding the websocket.)_
+FR2: Think-time boundaries come from the mod's main-loop turn events — burst begins at `turn.start`, ends at `turn.complete`; subagent turns are ignored. On burst begin the user is entered into the queue; on burst end the active chat ends, unless persist is enabled. _(Amended 2026-10-17; was: the companion tailing the session transcript.)_
 FR3: Tool-call boundaries within one turn are treated as the same continuous burst, so a single user turn maps to at most one match. `[ASSUMPTION]`
 FR4: If a burst ends while the user is still queued and never matched, the plugin silently removes them from the queue with no error surfaced.
-FR5: The companion renders adjacent to the Claude session — automatically as a `tmux` split pane when inside tmux; otherwise the plugin prints a one-line instruction to open it in a split/pane/window the user controls. Inbound messages render in the companion's own pane; nothing is pushed into the Claude Code TUI.
-FR6: The plugin is a no-op when the user is not opted in, the companion can't start, or the backend is unreachable — it must never block, delay, or error the Claude Code session. Where no adjacent split pane is possible (a bare terminal, a VS Code / JetBrains integrated terminal), the plugin opens the companion in a new OS terminal window where a terminal application can be launched — a real PTY, so the first-run screen works. Where no window can be opened (a headless / API-only context, or no usable terminal emulator), it spawns the companion detached and prints the one-line manual-placement hint. (Epic 2 retro F10 / item 17 built the new-window fallback and resolved the earlier placement-fallback assumption.)
+FR5: The chat renders inside the Claude Code session, in the mod's band and pane. There is no external pane, split, or window. _(Amended 2026-10-17; was: tmux / mux split, new-window fallback, one-line hint.)_
+FR6: The plugin is a no-op when the user is not opted in or the backend is unreachable — it must never block, delay, or error the Claude Code session. Where mod UI cannot draw (VS Code extension chat panel, Remote Control viewers, `claude -p`, Agent SDK, cloud sessions, Desktop WSL) the plugin never enters the queue — no surface, no queue. `[ACCEPTED LIMITATION, Diego 2026-10-16]` _(Amended 2026-10-17; the Epic 2 retro F10 new-window fallback is retired with the companion.)_
 
 **F2 — FIFO matching and queue**
 
@@ -112,13 +114,13 @@ NFR2: Server-persisted state is limited to: pseudonym + blurb, block lists, cool
 NFR3: The account key is not shown to other users or included in any client-visible payload.
 NFR4: A user can delete their profile and block list from within the plugin; deletion removes all server-side state keyed to them except active bans.
 NFR5: The privacy posture (what is and isn't stored) is documented in the repo in plain language.
-NFR6: A plugin hook blocks the Claude Code session for no more than ~50ms: it enqueues the action asynchronously and returns immediately. It fails open — any hook error or timeout is swallowed and the Claude session proceeds untouched. `[ASSUMPTION]`
+NFR6: No mod hook awaits the network or blocks the Claude Code session; render and turn hooks return promptly and all backend I/O runs in background tasks. Any error is swallowed into a calm offline state. _(Amended 2026-10-17; was: a hook blocks ≤~50ms.)_
 NFR7: Message relay round-trip is < ~500ms p90 under normal load. `[ASSUMPTION]`
 NFR8: The backend targets ~99% monthly reachability on a best-effort basis — no formal SLA — and degrades cleanly: an unreachable or erroring backend yields a calm "no one around right now" state, never an error dump, and never affects the Claude session. `[ASSUMPTION]`
 NFR9: The backend runs within a single small cloud instance's resources for the expected pool size (low hundreds of concurrent users). `[ASSUMPTION]`
-NFR10: All client↔server traffic is encrypted in transit (TLS / WSS).
+NFR10: All client↔server traffic is encrypted in transit (TLS / HTTPS).
 NFR11: The server treats all message content as untrusted: no rendering of remote markup/HTML, link inertness per FR14, input length caps.
-NFR12: The plugin sends its locally stored account-key UUID with each backend request over the encrypted channel; the server treats that UUID as the identity. No identity derivation, no Claude-account linkage, no separate auth handshake in v1.
+NFR12: The plugin sends its locally stored account-key UUID in `hello` over TLS; later requests carry only the opaque handle minted for it. The server treats that UUID as the identity. No identity derivation, no Claude-account linkage, no separate auth handshake in v1.
 NFR13: Target hosting cost for the public instance is under ~$20/month at expected scale. `[ASSUMPTION]`
 NFR14: The backend is packaged for one-command self-hosting (e.g. `docker compose up`), defaulting to the public instance's URL when run as a client.
 NFR15: The maintainer has a minimal status/metrics view: concurrent users, median time-to-match, reports outstanding, error rate.
@@ -184,6 +186,16 @@ _From the Architecture Spine (AD-1 … AD-18), Stack, and Structural Seed. `[ADO
 
 - AR30: The Claude Code session-transcript file location and JSONL schema are not a documented, stable contract, yet the companion depends on both. An implementation spike must pin the current format, build a defensive parser, and CI-test the full cross-build matrix (folds together with the `modernc.org/sqlite` Windows check).
 
+**Mods pivot (2026-10-17) — supersedes AR3 (TUI / websocket / fsnotify stack), AR4, AR5–AR8 (websocket wording), AR21, AR22, AR24, AR25, AR26 (companion half), and AR30. Those entries above are kept as history.**
+
+- AR31: The client is the plugin's mod — TypeScript loaded by Claude Code (no build step). It has no out-of-process component and ships no binaries.
+- AR32: Client transport is HTTPS JSON: `POST /v1/hello` mints a handle; `GET /v1/events?after=<seq>` is a long-poll held up to ~20s that returns ordered `{seq, …msg}` events; `POST /v1/send` posts one client→server message. The handle travels in a request header; the account key is sent only in `hello`.
+- AR33: Each handle has an ordered, bounded event queue with monotonic `seq`. The client acknowledges by passing `after`, so delivery is at-least-once and deduplicated by `seq`. Overflow ends the session with `session_ended` rather than dropping silently.
+- AR34: Connection liveness is a lease: a handle counts as connected while an events poll is in flight or for ~5s after one ends. A lapsed lease is a disconnect and starts the AR18 grace window.
+- AR35: Think-time comes from main-loop `turn.start` → `ready` and `turn.complete` → `busy`. Subagent turns are ignored.
+- AR36: No surface, no queue. The mod sends `ready` only while its UI is drawn on an attached surface; headless, VS Code chat panel, and Remote-Control-only sessions never queue.
+- AR37: The mod reads its configuration from plugin `userConfig` (`backendUrl`, defaulting to the public instance from Epic 6; and `persist`). The backend stays env-only. The account key lives at `os.UserConfigDir()/claudingtin/account-key` (the companion's path, so existing keys carry over), read and written via `$.fs`.
+
 ### UX Design Requirements
 
 No standalone UX design contract (`bmad-ux` spine) exists for this project. The companion's UX is specified as prose across:
@@ -196,12 +208,12 @@ These are already captured as FRs / NFRs above; no separate UX-DR list is mainta
 
 ### FR Coverage Map
 
-FR1: Epic 1 — companion process launched by the plugin on SessionStart
-FR2: Epic 1 — transcript-watch determines think-time boundaries; ready/busy to backend
-FR3: Epic 1 — tool-call boundaries within a turn = one burst = at most one match
-FR4: Epic 1 — burst ends while still queued → silent queue removal
-FR5: Epic 1 — pane placement (tmux / mux split, new-window fallback, one-line hint last)
-FR6: Epic 1 — plugin is a fail-open no-op when not opted in / companion can't start / backend unreachable
+FR1: Epic 7 — the mod is the chat surface (Epic 1 companion superseded)
+FR2: Epic 7 — main-loop turn events determine think-time; ready/busy to backend (Epic 1 transcript watch superseded)
+FR3: Epic 7 — one main-loop turn spans its tool calls = at most one match (first delivered in Epic 1)
+FR4: Epic 7 — burst ends while still queued → silent queue removal (first delivered in Epic 1)
+FR5: Epic 7 — chat draws in a mod Pane + AbovePrompt band; no external pane (Epic 1 placement superseded)
+FR6: Epic 7 — fail-open; no surface ⇒ no queue
 FR7: Epic 2 — strict FIFO pairing, no scoring
 FR8: Epic 4 — no match against block list or active cooldown
 FR9: Epic 2 — skip to next eligible pair rather than stall the queue
@@ -278,11 +290,19 @@ The small, entirely optional profile — pseudonym plus short blurb, in-plugin e
 One-command self-hosting from a single image with env-var-only configuration defaulting to the public instance URL, the Fly.io single-machine + volume deployment with WAL SQLite and forward-only migrations, the `GET /status` maintainer view (concurrent users, median time-to-match, reports outstanding, error rate) with the time-to-match instrumentation behind it, and the repo documentation set — README + install, plain-language privacy posture, self-host guide, report-handling process including the NCMEC path, and the license.
 **FRs covered:** FR12
 
+### Epic 7: Native in Claude Code (mods pivot)
+Replace the companion TUI and pane placement with a Claude Code mod that talks to the backend over a long-poll HTTPS API: the backend `/v1` transport in front of the unchanged hub, the account key and first-run gate in the mod, think-time from turn events with a "no surface, no queue" rule, the full chat surface (spinner + spin, chat pane, leave/block/report, end presentation, silent re-enqueue, grace resume) at parity with Epics 1–3, and deletion of the companion, `/ws`, the launcher, and the binary release pipeline.
+**FRs covered:** FR1, FR2, FR3, FR4, FR5, FR6 (re-delivered), FR10, FR16, FR18–FR21 (client side, re-delivered), FR43–FR46 (re-delivered)
+
+**Build order (2026-10-17):** E1 → E2 → E3 (3.1–3.5) → **E7** → E3 (3.6–3.7) → E4 → E5 → E6.
+
 ---
 
 ## Epic 1: Foundation, the think-time signal, and the safety gate
 
 Stand up the greenfield monorepo, the versioned wire contract, the fail-open plugin launch, the transcript-driven think-time signal, the reinstall-stable account key, and the local first-run 18+/safety gate — a companion that knows when the model is thinking, never disturbs Claude Code, and connects no one until the risks are acknowledged.
+
+> **Superseded in part (mods pivot, 2026-10-17):** Stories 1.3, 1.6, 1.7, 1.8, and the companion half of 1.9 / 2.3 / 2.5 / 3.2–3.5 were built for the Go companion and are superseded by Epic 7. They are kept as the historical record.
 
 ### Story 1.1: Monorepo scaffold and the `/proto` wire contract
 
@@ -717,19 +737,21 @@ So that a good conversation is not cut off the instant my model returns.
 
 **Acceptance Criteria:**
 
+> _Retargeted to the mod (2026-10-17); resumes after Epic 7._
+
 **Given** a fresh install
 **When** the persist setting is read
-**Then** it is on.
+**Then** it is on — `userConfig.persist` (boolean, default `true`).
 
 **Given** persist is on
-**When** the model returns (`busy`/turn-end)
-**Then** the chat stays open and the companion shows only a quiet note that the model is back.
+**When** the model returns (`turn.complete`)
+**Then** the chat stays open and the mod shows only a quiet note that the model is back.
 
 **Given** persist is off
 **When** the model returns
-**Then** the companion shows the end state and sends `leave` to the server (the UJ-1 friction-free exit).
+**Then** the mod shows the end state and sends `leave` to the server (the UJ-1 friction-free exit).
 
-**Given** the companion menu
+**Given** `/config` or `/claudingtin persist`
 **When** the user toggles persist
 **Then** the change takes effect on the next chat.
 
@@ -743,7 +765,7 @@ So that I have the one thread that could let me find this person again later.
 
 **Given** a chat that was persisted past the burst
 **When** it ends
-**Then** the companion offers the `session_id` (from `matched`) to copy, with a one-line note that it is the only way to find this person again.
+**Then** the mod's end state offers the `session_id` (from `matched`) with a Copy button (clipboard write; the ID is shown as text if no clipboard is reachable), with a one-line note that it is the only way to find this person again. _(Retargeted to the mod 2026-10-17.)_
 
 **Given** a chat that was not persisted
 **When** it ends
@@ -815,7 +837,7 @@ So that a block is a considered choice I stay in control of.
 
 **Acceptance Criteria:**
 
-**Given** the companion requests the block list
+**Given** the mod requests the block list
 **When** the backend responds with `blocklist`
 **Then** it contains every active manual block and no cooldowns.
 
@@ -825,7 +847,7 @@ So that a block is a considered choice I stay in control of.
 
 **Given** the block list is empty
 **When** it renders
-**Then** it shows a calm empty state per `voice.md`, reachable from the companion menu.
+**Then** it shows a calm empty state per `voice.md`, in a Pane opened by `/claudingtin blocks`.
 
 ### Story 4.4: Auto-cooldown between just-matched pairs
 
@@ -937,7 +959,7 @@ So that known slurs and abuse patterns are caught even without a report.
 
 **Given** the repo
 **When** a contributor looks for the list
-**Then** the list file and a governance note exist, its format is documented, and the companion's report/block UI links to the published community guidelines.
+**Then** the list file and a governance note exist, its format is documented, and the mod's report/block UI links to the published community guidelines (our own `Link`, never peer text).
 
 ### Story 4.9: Maintainer ban CLI
 
@@ -978,7 +1000,7 @@ So that a match sees a little of me if I want, and nothing if I do not.
 **Then** it works, and the peer sees a default/blank pseudonym.
 
 **Given** the user edits the profile and saves
-**When** the companion sends `profile_put` (full replace; empty = clear)
+**When** the mod sends `profile_put` from a `/claudingtin profile` Pane (full replace; empty = clear)
 **Then** the backend stores it, returns `profile_ack`, and it is the only source of the pseudonym/blurb delivered to a peer in the next `matched`.
 
 **Given** any `matched` payload a peer receives
@@ -1022,8 +1044,8 @@ So that I can walk away cleanly.
 **Then** the peer-facing pseudonym is back to default, and a follow-up `hello` still works because the account-key file is unchanged unless the user also explicitly reset it.
 
 **Given** the user also asks to clear local state
-**When** the companion processes it
-**Then** the local profile draft, persist preference, and safety acknowledgement are cleared, but the account-key file is kept unless explicitly reset.
+**When** the mod processes it
+**Then** the mod's `$.store` (profile draft) and the local safety acknowledgement are cleared and `persist` resets to its userConfig default, but the account-key file is kept unless explicitly reset.
 
 ### Story 5.4: Idle nudges
 
@@ -1055,7 +1077,7 @@ So that the empty queue still leads somewhere.
 
 **Given** the user has waited past a longer threshold with no match
 **When** the offer appears and the user submits a note
-**Then** the companion sends `note_put` and the note is attached to the user's queue entry, held in backend memory only (never disk or logs).
+**Then** the mod sends `note_put` and the note is attached to the user's queue entry, held in backend memory only (never disk or logs).
 
 **Given** the note's author is still waiting
 **When** the next client is paired with them
@@ -1085,15 +1107,15 @@ So that standing up my own pool is trivial and drift-free.
 
 **Given** the repo
 **When** `docker compose up` is run against `deploy/docker-compose.yml`
-**Then** a working backend starts that a companion can connect to, with a volume mounted at `DB_PATH`.
+**Then** a working backend starts that the mod can connect to, with a volume mounted at `DB_PATH`.
 
 **Given** the backend
 **When** its configuration is inspected
 **Then** every setting (`PORT`, `DB_PATH`, `KEYWORDS_PATH`, optional `REPORT_WEBHOOK`) is an environment variable and there is no config file anywhere.
 
-**Given** a companion with no `SERVER_URL` set
+**Given** the mod with no `backendUrl` set
 **When** it starts
-**Then** it connects to the public instance URL by default; the compose file documents the volume and the TLS-reverse-proxy expectation.
+**Then** it connects to the public instance URL by default (the `plugin.json` `userConfig.backendUrl` default flips from `http://127.0.0.1:8080` to the public HTTPS URL); the compose file documents the volume and the TLS-reverse-proxy expectation.
 
 ### Story 6.2: Fly.io deployment
 
@@ -1105,7 +1127,7 @@ So that the public instance runs cheaply and predictably.
 
 **Given** `deploy/fly.toml`
 **When** `fly deploy` runs
-**Then** one `shared-cpu-1x` machine comes up with a volume mounted at `DB_PATH`, TLS terminated at Fly, free shared IPv4, and reachable over WSS.
+**Then** one `shared-cpu-1x` machine comes up with a volume mounted at `DB_PATH`, TLS terminated at Fly, free shared IPv4, and reachable over HTTPS; the ~20s long-poll hold stays under the Fly proxy idle timeout.
 
 **Given** the Fly configuration
 **When** scaling is inspected
@@ -1129,7 +1151,7 @@ So that I can tell at a glance whether liquidity (M1) is holding.
 
 **Given** `GET /status`
 **When** it is called
-**Then** it returns concurrent users, median time-to-match, reports outstanding (unactioned `report` rows), and error rate, as JSON plus a minimal HTML view.
+**Then** it returns concurrent users (live leases counted separately from grace-held sessions), median time-to-match, reports outstanding (unactioned `report` rows), and error rate, as JSON plus a minimal HTML view.
 
 **Given** `/status`
 **When** it is served
@@ -1170,3 +1192,149 @@ So that I know the terms before contributing or self-hosting.
 **Given** the repo convention for source headers
 **When** CI runs
 **Then** there are no license-check failures.
+
+---
+
+## Epic 7: Native in Claude Code (mods pivot)
+
+Replace the Go companion TUI and terminal pane placement with a Claude Code mod that draws the chat inside the session and talks to the backend over a long-poll HTTPS API — reaching parity with everything Epics 1–3 delivered, then deleting the companion. Sequenced before Stories 3.6–3.7 (see Build order). Source: `sprint-change-proposal-2026-10-17.md`.
+
+### Story 7.1: Mods skeleton — backend-status band
+
+_Done as built: commit `b76083d`, `spec-mods-skeleton.md`._
+
+As a user, I want a one-line claudingtin band above my prompt, so that I can see the plugin is alive and whether the backend is reachable.
+
+**Acceptance Criteria:**
+
+**Given** the plugin loaded with `userConfig.backendUrl`
+**When** the session starts
+**Then** an AbovePrompt band polls `GET /status` and reads `claudingtin · connected` or `claudingtin · offline`, fails open on any error, and times a hung poll out after 4s.
+
+### Story 7.2: Backend HTTP long-poll transport
+
+As a mod client,
+I want an HTTPS API to the hub,
+So that I can queue, chat, and leave without a socket.
+
+**Acceptance Criteria:**
+
+**Given** `POST /v1/hello` with `{v, account_key, session_id?}` and a supported protocol version
+**When** the backend processes it
+**Then** it returns a `welcome` carrying an opaque `handle`; an unsupported version gets `please_update` and no handle.
+
+**Given** a key already holds an active handle
+**When** a second `hello` for that key arrives
+**Then** the old handle's queue receives `session_ended`, its later requests get 410, and the new handle is active (AD-16).
+
+**Given** `GET /v1/events?after=N` on a valid handle
+**When** events with `seq > N` exist
+**Then** they return immediately in `seq` order; otherwise the request is held up to ~20s and returns an empty list; events `≤ N` are dropped from the queue; a full queue ends the session with `session_ended` rather than dropping silently.
+
+**Given** `POST /v1/send` with any client→server `/proto` message
+**When** the backend processes it
+**Then** it reaches the hub exactly as a `/ws` frame does today, and a protocol error returns an `error` body, never a 5xx.
+
+**Given** no events poll on a handle for longer than the lease (~poll cap + 5s)
+**When** the lease lapses
+**Then** the hub treats it as a disconnect and the reconnect grace window runs; a poll on the same handle (or `hello` with key + `session_id`) inside grace resumes with no `session_ended` to the peer.
+
+**Given** the change
+**When** tests run
+**Then** the hub and `/ws` are untouched; a contract test drives two HTTP clients through match → chat → leave → re-enqueue; logs carry no handle, key, or content; `/proto` gains `welcome`, drops `heartbeat`, and emits golden JSON fixtures for every message type.
+
+### Story 7.3: Account key and first-run gate in the mod
+
+As a user,
+I want my existing anonymous identity and an honest first-run screen inside Claude Code,
+So that nothing connects until I have acknowledged the risks, and my blocks survive the move.
+
+**Acceptance Criteria:**
+
+**Given** the mod starts
+**When** it needs the account key
+**Then** it reads or creates `os.UserConfigDir()/claudingtin/account-key` via `$.fs` (the companion's path — an existing key carries over) with mode 0600, regenerates a corrupt or empty file, and never shows the key in logs, toasts, or UI.
+
+**Given** the safety screen has not been accepted
+**When** the mod would make any request other than `GET /status`
+**Then** it instead opens a focused Pane with what the product is, the honest safety warning, the block/report explainer, and an "I am 18 or older" control.
+
+**Given** the user accepts or declines
+**When** the screen closes
+**Then** acceptance is stored locally only with no server round-trip; declining leaves the mod inert and re-asks next session; `/claudingtin safety` re-opens the screen; copy matches `voice.md`.
+
+### Story 7.4: Think-time from turn events, and "no surface, no queue"
+
+As a user,
+I want to be queued exactly while my model is working and I can actually see the chat,
+So that I never get matched into a conversation I can't see.
+
+**Acceptance Criteria:**
+
+**Given** a main-loop `turn.start` (`e.agentId` undefined)
+**When** the mod handles it
+**Then** it sends `ready`; on the matching `turn.complete` it sends `busy`; subagent turns and tool calls never produce a second `ready`; no hook awaits the network.
+
+**Given** the mod's UI is not drawn on an attached surface (`claude -p`, VS Code chat panel, detached session)
+**When** a turn starts
+**Then** the mod never sends `ready` and never queues.
+
+**Given** the first eligible `ready`
+**When** the mod has no handle
+**Then** it sends `hello` lazily; the handle lives in `$.state` so a hot reload resumes rather than re-hellos; a superseded handle (410) goes quiet until the next `turn.start`, so two Claude Code sessions sharing one key don't ping-pong.
+
+**Given** a burst ends while the user is still queued
+**When** `busy` is sent
+**Then** the user is removed silently with nothing surfaced.
+
+### Story 7.5: Mod chat surface (parity with Epics 2–3)
+
+As a matched user,
+I want the whole chat — spinner, spin, conversation, and calm endings — inside Claude Code,
+So that I never have to look at another window.
+
+**Acceptance Criteria:**
+
+**Given** the user is queued
+**When** the band renders
+**Then** it shows only a searching spinner (no position, ETA, or count); on `matched` a brief bounded flourish plays and the chat Pane opens without delaying input readiness.
+
+**Given** an active chat
+**When** the Pane renders
+**Then** it shows the peer pseudonym + blurb, the opener once, the current-chat history, an Input, and always-visible leave / block / report Buttons mirrored as `/claudingtin leave|block|report`; outbound lines render optimistically keyed by `client_msg_id`; input length is capped client-side.
+
+**Given** peer text containing control bytes, markdown, HTML, or URLs
+**When** it renders
+**Then** it goes only through `Text` with control characters stripped — never `Markdown`, `Link`, or `Code`.
+
+**Given** any `session_ended`, or the user's own leave
+**When** the chat ends
+**Then** the same "their Claude came back" state shows (no confirm, exactly one `leave` sent on a local leave); late peer lines after leaving are not shown; if the burst is still active the band returns to the spinner (re-enqueue is the backend's); a long-poll gap inside grace is invisible.
+
+**Given** a terminal narrower than the pane's docking width
+**When** the chat opens
+**Then** the pane falls back to inline mode and every control stays reachable via the slash commands. This story ships in one PR with Story 7.6.
+
+### Story 7.6: Remove the companion and pane placement
+
+As the maintainer,
+I want the companion, `/ws`, and every placement path gone,
+So that there is one client, one transport, and no binary release pipeline to maintain.
+
+**Acceptance Criteria:**
+
+**Given** the repo after the change
+**When** it is inspected
+**Then** `companion/`, the backend `/ws` handler (and `coder/websocket`), `plugin/cmd/session-start`, `plugin/hooks/session-start.sh`, `plugin/bin/`, the plugin Go module, and the `SessionStart` hook are gone; `go.work` and `scripts/workspace_modules.sh` cover only `proto` and `backend`.
+
+**Given** CI and release workflows
+**When** they run
+**Then** the companion cross-build and binary attach are gone, and `claude plugin validate --strict plugin` and `claude plugin test plugin` run and pass.
+
+**Given** the plugin manifest
+**When** tests run
+**Then** a test asserts `hooks.json` lists the mod module and the `userConfig` defaults match the code's defaults.
+
+**Given** `deferred-work.md`
+**When** this lands
+**Then** the companion-only rows are marked obsolete.
