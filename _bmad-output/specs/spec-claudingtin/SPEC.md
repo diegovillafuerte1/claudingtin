@@ -15,12 +15,12 @@ sources:
 
 ## Why
 
-**A vision to realize, for a specific person to reach.** The target user is a lonely, AI-heavy Claude Code user who spends hours a day driving a model that thinks in bursts of seconds to minutes. That dead time is frequent and empty. This puts a small hit of genuine human contact in the gap: while your model works, you are paired FIFO with another Claude user for an ephemeral 1:1 text chat, and every way of leaving is framed as your model returning so it never reads as rejection. It is a for-fun open-source project, not a startup and not a growth play. It succeeds if lonely users can reliably find someone to talk to during think-time; it fails if it becomes a time sink or gets designed around daily-actives. v1 is a Claude Code plugin plus a bundled companion TUI plus one hosted matching/relay backend; the v2 reconnect webapp is out of scope.
+**A vision to realize, for a specific person to reach.** The target user is a lonely, AI-heavy Claude Code user who spends hours a day driving a model that thinks in bursts of seconds to minutes. That dead time is frequent and empty. This puts a small hit of genuine human contact in the gap: while your model works, you are paired FIFO with another Claude user for an ephemeral 1:1 text chat, and every way of leaving is framed as your model returning so it never reads as rejection. It is a for-fun open-source project, not a startup and not a growth play. It succeeds if lonely users can reliably find someone to talk to during think-time; it fails if it becomes a time sink or gets designed around daily-actives. v1 is a Claude Code plugin whose mod draws the chat inside Claude Code, plus one hosted matching/relay backend; the v2 reconnect webapp is out of scope.
 
 ## Capabilities
 
 - **CAP-1 — Think-time detection and auto-enqueue**
-  - **intent:** While the user's model is working, the companion detects the think-time burst by tailing the Claude Code session transcript and enters the user into the match queue with no action from them; when the burst ends the active chat ends unless persist is on for that user.
+  - **intent:** While the user's model is working, the plugin's mod detects the think-time burst from Claude Code's main-loop turn events and enters the user into the match queue with no action from them; when the burst ends the active chat ends unless persist is on for that user.
   - **success:** Submitting a prompt in Claude Code places the user in the queue within that burst; a single user turn including its tool calls maps to at most one match; a burst that ends while the user is still unmatched removes them from the queue silently with no error surfaced.
 
 - **CAP-2 — FIFO pairing**
@@ -28,12 +28,12 @@ sources:
   - **success:** The longest waiter is matched to the first eligible arrival; median time-to-match is instrumented server-side (queue-enter to pairing) and runs under ~15s during active hours; an ineligible queue head never stalls the queue; both matched users receive the same opener at the same time.
 
 - **CAP-3 — Ephemeral text chat surface**
-  - **intent:** Paired users exchange text-only messages in the companion's own pane, placed adjacent to the Claude session (tmux auto-split where available, manual placement otherwise), showing the peer's pseudonym and optional blurb, the current chat's history, an input box, and always-visible block / report / leave controls.
+  - **intent:** Paired users exchange text-only messages in a pane and band the plugin's mod draws inside the Claude Code session, showing the peer's pseudonym and optional blurb, the current chat's history, an input box, and always-visible block / report / leave controls.
   - **success:** Messages relay in-memory only with no disk write on client or server; no image, file, audio, or video can be sent; URLs are inert; the surface shows connection state using the no-rejection language of CAP-4; message relay round-trip is under ~500ms p90 at expected load.
 
 - **CAP-4 — No-rejection exit convention**
   - **intent:** Every chat-ending event — model returns, peer leaves, block, report, network disconnect — is presented to the remaining user with one identical neutral "their Claude came back" framing.
-  - **success:** No UI path ever tells a user they were left, rejected, blocked, or reported; the wire `session_ended` message carries no cause field and no session ID; a disconnect or chat-end while the user's burst is still active returns them to the spinner and silently re-enqueues them; the companion decides whether to offer "copy session ID" from its own local persist state, never from message contents.
+  - **success:** No UI path ever tells a user they were left, rejected, blocked, or reported; the wire `session_ended` message carries no cause field and no session ID; a disconnect or chat-end while the user's burst is still active returns them to the spinner and silently re-enqueues them; the mod decides whether to offer "copy session ID" from its own local persist state, never from message contents.
 
 - **CAP-5 — Persist toggle and session-ID keepsake**
   - **intent:** A per-user "persist" toggle, shipping default-on, keeps a chat alive past the end of the think-time burst until the user explicitly leaves; when a persisted chat ends the user is offered that chat's opaque session ID to copy, with a one-line note that it is the only way to find this person again.
@@ -56,11 +56,11 @@ sources:
   - **success:** A report row is the only circumstance under which any message content is written to storage, and it is deleted once actioned; a banned key cannot queue or chat, taking effect within ~10s of the ban command; the repo ships community guidelines and the report/block flow links to them.
 
 - **CAP-10 — Content sanitization and keyword filter**
-  - **intent:** The backend is the single point that strips or inerts links, enforces message length caps, rejects oversized or non-text frames on ingest, and applies a repo-maintained keyword filter — all before relay; the companion renders all peer text as literal.
-  - **success:** No active link reaches a peer; slurs and known abuse patterns on the maintained list are blocked or flagged; the companion renders no remote markup, HTML, or control sequences from peer text; empty-queue notes are subject to the same rules.
+  - **intent:** The backend is the single point that strips or inerts links, enforces message length caps, rejects oversized or non-text frames on ingest, and applies a repo-maintained keyword filter — all before relay; the mod renders all peer text as literal.
+  - **success:** No active link reaches a peer; slurs and known abuse patterns on the maintained list are blocked or flagged; the mod renders no remote markup, HTML, or control sequences from peer text; empty-queue notes are subject to the same rules.
 
 - **CAP-11 — First-run onboarding and 18+ gate**
-  - **intent:** Before any network call, the companion presents what the product is, an honest safety warning (you are being connected to strangers; do not share identifying, location, or financial information; screenshots and quoting are possible), the block/report explanation, and an affirmative "I am 18 or older" attestation; the safety screen stays re-accessible from the plugin menu.
+  - **intent:** Before any network call, the mod presents what the product is, an honest safety warning (you are being connected to strangers; do not share identifying, location, or financial information; screenshots and quoting are possible), the block/report explanation, and an affirmative "I am 18 or older" attestation; the safety screen stays re-accessible via `/claudingtin safety`.
   - **success:** No traffic leaves the machine until the screen is cleared; declining the age or safety acknowledgement leaves the plugin installed but inert (no queue, no chat); attestation is self-declared only, with no ID check, no age estimation, and no server-side attestation record.
 
 - **CAP-12 — Empty-queue "leave a note"**
@@ -68,12 +68,12 @@ sources:
   - **success:** Notes are ephemeral — consumed by the next arrival or expiring — and held in backend memory only; they are subject to the same text-only, link-inert, and keyword-filter rules as chat; in v1 a note is never publicly listed.
 
 - **CAP-13 — Fail-open host integration**
-  - **intent:** The plugin's `SessionStart` hook spawns the companion once per Claude Code session, detached, with a hard timeout, and returns immediately; every failure path is swallowed.
-  - **success:** A hook blocks the Claude Code session for no more than ~50ms; a spawn error, missing binary, unreachable backend, or crashed companion produces no error, delay, or block in the Claude Code UI; not being opted in is a silent no-op.
+  - **intent:** The mod never blocks, delays, or errors the host Claude Code session: its hooks never await the network, every failure becomes a calm offline state, and where mod UI cannot draw the plugin never queues.
+  - **success:** No mod hook awaits the network or throws into the host; an unreachable backend yields a calm offline state with no error, delay, or block in the Claude Code UI; under `claude -p`, the VS Code chat panel, or Remote-Control-only viewing the user is never queued; not being opted in is a silent no-op.
 
 - **CAP-14 — Self-hostable backend and maintainer status**
   - **intent:** The backend ships as a single image that self-hosts with one command and, run as a client, defaults to the public instance URL; it is configured through environment variables only and exposes a minimal `GET /status` view.
-  - **success:** `docker compose up` runs a working pool; `GET /status` reports concurrent users, median time-to-match, reports outstanding, and error rate; the only HTTP endpoints are the websocket upgrade and `GET /status` (maintainer actions are CLI subcommands on the same binary); the public instance fits one small cloud instance at low-hundreds concurrency for under ~$20/month.
+  - **success:** `docker compose up` runs a working pool; `GET /status` reports concurrent users, median time-to-match, reports outstanding, and error rate; the only HTTP endpoints are the `/v1` client API (hello, events, send) and `GET /status` (maintainer actions are CLI subcommands on the same binary); the public instance fits one small cloud instance at low-hundreds concurrency for under ~$20/month.
 
 - **CAP-15 — Open-source project documentation**
   - **intent:** The repo ships the documentation a self-hoster and a report-handler need to operate the product responsibly.
@@ -81,21 +81,21 @@ sources:
 
 ## Constraints
 
-- **Claude Code only in v1.** Think-time is detectable only via the Claude Code session transcript and hooks; no claude.ai, no Claude Desktop, no web client. The v2 reconnect webapp is a separate initiative and is reconnect-only, never a real-time UI.
+- **Claude Code only in v1.** Think-time is detectable only via Claude Code's mod turn events, and the chat draws only where mod UI draws; no claude.ai, no Claude Desktop, no web client. The v2 reconnect webapp is a separate initiative and is reconnect-only, never a real-time UI.
 - **Nothing about chat content is persisted anywhere**, client or server; the relay holds messages in memory only for delivery. Sole exception: a report payload (the last ~20 messages of one chat), deleted once actioned.
-- **The backend is the single authority for all matching and moderation policy** — identity acceptance, eligibility (block / cooldown / ban), rate limiting, keyword filtering. The open-source companion renders outcomes and never gates on policy locally. Carve-out: the first-run 18+/safety gate is a local companion precondition with no server round-trip and no attestation record.
-- **Hub-and-spoke only.** All queue, pairing, and session state lives in the backend and only there; companions hold no authoritative state and never communicate companion-to-companion. A companion's only recovery action is to reconnect and re-announce.
-- **Identity is a presented, unverified random UUID.** The companion reads or creates it once at a stable OS-config path outside the plugin directory and sends it in `hello`; the backend trusts it with no verification. No Claude-account linkage is possible — the platform exposes none to plugin code. Ban and block evasion by a motivated user (deleting the id file, modified client) is accepted for v1.
-- **The plugin must never block, delay, or error the host Claude Code session.** Every failure path fails open; a hook returns in ≤~50ms.
+- **The backend is the single authority for all matching and moderation policy** — identity acceptance, eligibility (block / cooldown / ban), rate limiting, keyword filtering. The open-source mod renders outcomes and never gates on policy locally. Carve-out: the first-run 18+/safety gate is a local mod precondition with no server round-trip and no attestation record.
+- **Hub-and-spoke only.** All queue, pairing, and session state lives in the backend and only there; mod clients hold no authoritative state and never communicate with each other. A client's only recovery action is to re-poll on its handle or re-announce with `hello`.
+- **Identity is a presented, unverified random UUID.** The mod reads or creates it once at a stable OS-config path outside the plugin directory and sends it in `hello`; the backend trusts it with no verification. No Claude-account linkage is possible — the platform exposes none to plugin code. Ban and block evasion by a motivated user (deleting the id file, modified client) is accepted for v1.
+- **The plugin must never block, delay, or error the host Claude Code session.** Every failure path fails open; no mod hook awaits the network.
 - **Text only, no media, links inert** — the single highest-leverage safety decision, removing the CSAM-image, nudity, and malware-link surfaces that sank video-based precedents.
 - **18+ only, self-attested.** No ID checks, no third-party age estimation, no minor-safe mode. Residual regulatory risk is accepted and documented, not mitigated by additional gating.
 - **Single backend instance in v1** — one SQLite file, no horizontal scale. Sized for low hundreds of concurrent users on one small cloud instance; hosting target under ~$20/month (~$5–10/month real Fly.io bill).
 - **FIFO with no matching algorithm and no preference weighting.** The optional "prefer to be matched with" hint is stored only to seed v2 and has zero effect on v1 pairing.
 - **Reactive moderation only** — reports, block, rate limits, keyword filter, fast bans. No proactive or ML content scanning. A documented NCMEC reporting path applies on actual knowledge of CSAM.
 - **The public instance is operated by the maintainer as an individual**, with no legal entity behind it; the ToS and privacy policy are authored in the maintainer's personal name. Self-hosters operate under their own name, and the repo docs say so.
-- **The wire protocol is versioned JSON defined once in `/proto`.** Both companion and backend import `/proto`; no message shape exists elsewhere. The backend accepts the current and previous minor version; an older companion gets a single `please_update` then a close.
-- **All client↔server traffic is TLS/WSS**, and the server treats all message content as untrusted: no rendering of remote markup or HTML, input length caps, link inertness.
-- **The implementation stack and topology are fixed by the adopted architecture spine** — Go 1.27, a Bubble Tea v2 companion TUI, `coder/websocket`, pure-Go `modernc.org/sqlite`, a single Fly.io machine plus one volume, in a monorepo of `/plugin`, `/companion`, `/backend`, `/proto`. See `ARCHITECTURE-SPINE.md` for the 18 architecture decisions, wire message set, entity model, and source tree.
+- **The wire protocol is versioned JSON defined once in `/proto`.** The backend imports `/proto` and the mod's TypeScript types are checked against `/proto`'s golden JSON fixtures; no message shape exists elsewhere. The backend accepts the current and previous minor version; an older client gets a single `please_update` and no handle.
+- **All client↔server traffic is TLS/HTTPS**, and the server treats all message content as untrusted: no rendering of remote markup or HTML, input length caps, link inertness.
+- **The implementation stack and topology are fixed by the adopted architecture spine** — Go 1.27 backend, a TypeScript Claude Code mod (Claude Code ≥ 2.1.301), HTTPS long-poll transport, pure-Go `modernc.org/sqlite`, a single Fly.io machine plus one volume, in a monorepo of `/plugin`, `/backend`, `/proto`. See `ARCHITECTURE-SPINE.md` for the 20 architecture decisions, wire message set, entity model, and source tree.
 - **User-facing copy is warm, light, and human** — never corporate, clinical, or therapized. Exit copy is a cheerful "catch you later" with no apology and no "are you sure?"; the searching→matched transition has a brief non-blocking flourish. See `voice.md`.
 - **No paid acquisition and no bot or fake-user queue fill.** Launch into a single beachhead community, optionally concentrated with scheduled "power-hour" windows.
 
@@ -119,14 +119,14 @@ Primary (M1): median time-to-match under ~15s during active hours, measured serv
 
 ## Assumptions
 
-- Watching the Claude Code session transcript is a reliable way to detect turn start and end — the transcript path and format are stable enough. (Also an open question — see below.)
+- Claude Code's main-loop `turn.start` / `turn.complete` events reliably bracket a user turn.
 - Tool-call boundaries within one turn are one continuous burst, so a user turn maps to at most one match.
 - If the two longest waiters are ineligible for each other, the backend skips to the next eligible pair rather than stalling the queue.
 - Auto-cooldown is roughly: ~1 minute paired, or ≥1 message each way, then a ~24h bar on re-matching. Exact rules are OQ-5.
 - Rate-limit starting bounds: ≤1 new match per ~10s, ≤~5 messages per second, exactly 1 concurrent session. Tunable.
 - A report captures the last ~20 messages of that chat only. Exact N is OQ-8.
 - Reconnect grace window is ~10s; a CLI ban takes effect within ~10s (backend ban re-read interval / `SIGHUP`).
-- Message relay round-trip is under ~500ms p90; a hook blocks the Claude Code session ≤~50ms; the backend targets ~99% monthly reachability, best-effort, no SLA.
+- Message relay round-trip is under ~500ms p90; no mod hook awaits the network; the backend targets ~99% monthly reachability, best-effort, no SLA.
 - The open-source license is MIT or Apache-2.0 (choice is OQ-10).
 
 ## Open Questions
@@ -137,5 +137,5 @@ Primary (M1): median time-to-match under ~15s during active hours, measured serv
 - **OQ-10** — Open-source license choice, MIT vs. Apache-2.0. Owner: Diego.
 - **OQ-A** — Self-attested 18+ may be held legally inadequate (UK Online Safety Act / Ofcom "Highly Effective Age Assurance" in force since 2025-07-25; EU trending the same way). Risk is accepted for v1; revisit if the public instance draws a jurisdiction's attention or outgrows hobby scale. Owner: Diego.
 - **OQ-B** — "Matching-as-defective-product" liability (*A.M. v. Omegle* let negligent-design claims past Section 230). Get an informal legal read before public launch and keep the FIFO / 18+ / text-only rationale documented in the repo. Owner: Diego.
-- **Transcript contract spike** — The Claude Code session-transcript file location and JSONL schema are not a documented, stable contract, yet the companion depends on both. Needs an implementation spike to pin the current format, build a defensive parser, and CI-test the full cross-build matrix (including `modernc.org/sqlite` on Windows).
+- **Mods API churn** — The mods API is early access and may change between Claude Code releases without notice. Pin a minimum Claude Code version in the README; on each version bump, diff `claude-code.d.ts` for the surfaces used (`turn.*`, `ui.*`, `http.fetch`, `fs`, `store`, `command.register`); keep `claude plugin test` in CI. Owner: Diego.
 - **Legal docs** — The ToS and privacy policy in the maintainer's personal name are still to be drafted. Owner: Diego.

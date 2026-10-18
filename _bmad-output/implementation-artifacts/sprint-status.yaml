@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-01-2026 02:10
-last_updated: 09-16-2026 00:00
+last_updated: 10-17-2026 00:00
 project: claudingtin
 project_key: NOKEY
 tracking_system: file-system
@@ -60,10 +60,22 @@ development_status:
   3-2-their-claude-came-back-presentation-and-no-alarm-language: done
   3-3-explicit-leave-control: done
   3-4-reconnect-grace-window: done
-  3-5-silent-re-enqueue-while-busy: review
+  3-5-silent-re-enqueue-while-busy: done            # PR #30 merged 2026-09-16
+  # Epic 3 paused after 3-5; 3-6/3-7 resume after epic-7 (mods pivot 2026-10-17)
   3-6-persist-toggle-default-on: backlog
   3-7-session-id-keepsake-on-persisted-chat-end: backlog
   epic-3-retrospective: optional
+
+  # Mods pivot (sprint-change-proposal-2026-10-17.md). Build order:
+  # E1 -> E2 -> E3 (3-1..3-5) -> E7 -> E3 (3-6, 3-7) -> E4 -> E5 -> E6
+  epic-7: in-progress
+  7-1-mods-skeleton-backend-status-band: review      # b76083d on feat/mods-skeleton, no PR yet
+  7-2-backend-http-long-poll-transport: backlog
+  7-3-account-key-and-first-run-gate-in-the-mod: backlog
+  7-4-think-time-from-turn-events-and-no-surface-no-queue: backlog
+  7-5-mod-chat-surface: backlog                      # ships in one PR with 7-6
+  7-6-remove-the-companion-and-pane-placement: backlog
+  epic-7-retrospective: optional
 
   epic-4: backlog
   4-1-persisted-policy-store-and-single-writer-load: backlog
@@ -111,7 +123,9 @@ action_items:
     epic: 1
     action: "F3: Decide warn-vs-refuse on ws:// to a non-loopback host in companion
       resolve/dialer; until then record the accepted, time-boxed deviation from the
-      TLS/WSS invariant (expiry: Epic 6 deploy)."
+      TLS/WSS invariant (expiry: Epic 6 deploy). RETARGETED 2026-10-17 (mods pivot):
+      decide warn-vs-refuse on an http:// userConfig.backendUrl to a non-loopback host
+      in the mod; same expiry."
     owner: "Diego"
     status: open
     ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
@@ -145,9 +159,10 @@ action_items:
   - id: "epic-1-retro-item-7-f4-when-a-third-atomic-file-caller-appea"
     epic: 1
     action: "F4: When a third atomic-file caller appears, extract companion/internal/atomicfile
-      from the duplicated identity + safety write/read dance."
+      from the duplicated identity + safety write/read dance. OBSOLETE 2026-10-17: the
+      companion is removed in Story 7-6 (mods pivot)."
     owner: "Diego"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
   - id: "epic-1-retro-item-8-f9-plugin-hooks-hooks-json-used-the-sett"
     epic: 1
@@ -186,7 +201,8 @@ action_items:
     action: "F7: Give the hub deliver()-reports-success hardening an owner as an Epic
       3 story alongside session_ended reliability + reconnect-grace resume. Until
       then record the silent-drop-past-32-frame-buffer relay behaviour as an accepted
-      v1 deviation."
+      v1 deviation. OWNED BY 7-2 (2026-10-17): AD-19 makes queue overflow end the
+      session with session_ended instead of dropping silently."
     owner: "Diego"
     status: open
     ref: "_bmad-output/implementation-artifacts/epic-2-retro-2026-09-07.md"

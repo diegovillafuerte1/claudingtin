@@ -276,3 +276,25 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-mods-skeleton.md`
   summary: While the backend accepts connections but never answers, each 5 s poll abandons another hung `$.http.fetch` after its 4 s timeout, and nothing caps them. The mods `HttpInit` has no timeout/abort field, so they can't be cancelled.
   evidence: edge-case-hunter + blind-hunter (review iteration 2). Bounded only by the host's own request timeout, which isn't documented. A cap on outstanding fetches risks wedging polling permanently if they never settle, so revisit once the mods API gains an abort signal or a documented host timeout.
+
+---
+
+## Mods pivot triage (2026-10-17, `sprint-change-proposal-2026-10-17.md`)
+
+**Obsolete at Story 7.6** (the code they concern is deleted with `companion/` and `/ws`):
+- Windows CI flakes: `TestWatcherRecoversFromRotation`, `TestResolveExistingWaitsForWinner`.
+- `run.loop` deadlock on `chat.Println` after the chat program exits.
+- `TestIntentRacingChatProgramExitDoesNotWedgeLoop` timing flake.
+- windowterm: Windows `cmd /c start` argv collapse; Linux terminal `-e` / `--` conventions.
+- Story 3.2: takeover spinner flash; last peer `chat_msg` dropped at chat end; `session_ended` racing `matched` strands a pane; wsclient half-open detection; close-code takeover heuristic.
+- Story 3.3: `proto.ChatMsg` carries no session id (AD-19's single ordered event stream removes the race class).
+- Story 3.5: `run.loop`'s unbounded `SessionEnded()` priority drain; `wsclient` buffered-by-one `matched`/`session_ended` sends dropping a second frame.
+- "Remove terminal-multiplexer pane placement" — now Story 7.6.
+
+**Moved to a story:**
+- Story 3.1 idle-displaced `sentEnd` latch → Story 7.2 (defines takeover for HTTP: `session_ended` then 410).
+- `Hub.Count()` counts grace-held sessions → Story 6.3 (count live leases and held sessions separately).
+- CI never runs `claude plugin validate` / `claude plugin test` → Story 7.6.
+- No manifest test for `modules` / `userConfig` default → Story 7.6.
+- AbovePrompt band doesn't compose with `next(e)` → Story 7.5.
+- Uncapped abandoned hung `$.http.fetch` calls → Story 7.4 (long-poll client: one events poll in flight, client-side abandon > server hold).

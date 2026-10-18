@@ -2,11 +2,11 @@
 
 Load-bearing terms every downstream consumer of `SPEC.md` shares. Ordered roughly by when a reader meets them.
 
-- **Think-time burst** — The stretch from the user submitting a prompt to the model finishing its response: the dead time the product fills. Approximate; there is no true "thinking started/stopped" signal, so the companion derives the boundaries by tailing the session transcript (CAP-1).
+- **Think-time burst** — The stretch from the user submitting a prompt to the model finishing its response: the dead time the product fills. The mod reads its boundaries from Claude Code's main-loop `turn.start` and `turn.complete` events (CAP-1).
 
-- **Companion** — The long-lived Go TUI the plugin bundles and launches once per Claude Code session. It watches the transcript, holds the websocket to the backend, renders the chat in its own pane, and places that pane (tmux auto-split, or manual elsewhere). It holds no authoritative state.
+- **Mod** — The TypeScript module inside the claudingtin plugin that Claude Code runs in-process for the session. It detects think-time from turn events, talks to the backend over HTTPS (long-poll), and draws the chat in an AbovePrompt band and a docked pane. It holds no authoritative state. (Replaced the Go **companion** TUI in the 2026-10-17 mods pivot.)
 
-- **Backend / hub** — The one hosted Go service that holds all queue, pairing, and session state in memory and enforces every matching and moderation policy. Companions are spokes that render and relay only.
+- **Backend / hub** — The one hosted Go service that holds all queue, pairing, and session state in memory and enforces every matching and moderation policy. Mod clients are spokes that render and relay only.
 
 - **Account key** — A random UUIDv4 generated once and stored at a stable path outside the plugin directory (an OS config dir), so a plugin reinstall or update keeps it. The single identifier every block, auto-cooldown, ban, and rate limit is keyed to. No Claude-account linkage is possible (platform limit); the backend only ever sees the UUID and trusts it unverified. Resettable by deleting the id file, so enforcement is best-effort. Never shown to other users or sent in any client-visible payload.
 

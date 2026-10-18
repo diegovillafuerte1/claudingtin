@@ -2,7 +2,7 @@
 title: "PRD — Claude Think-Time Chat Roulette"
 status: final
 created: 2026-08-31
-updated: 2026-09-01
+updated: 2026-10-17
 ---
 
 # PRD — Claude Think-Time Chat Roulette
@@ -21,8 +21,8 @@ whether lonely users can reliably find someone to talk to, not time-in-app.
 
 **Shape.** Two halves, built in order:
 
-- **v1 (this PRD's build target):** a Claude Code plugin. FIFO roulette pairing, a
-  terminal-adjacent chat surface, and the safety primitives that make stranger chat
+- **v1 (this PRD's build target):** a Claude Code plugin. FIFO roulette pairing, an
+  in-session chat surface drawn by the plugin's Claude Code mod, and the safety primitives that make stranger chat
   survivable for a small project. **Ephemeral** in the sense that *nothing is stored* — no
   chat logs, client or server (FR15). Chat *duration* is governed by the **persist** toggle,
   which ships default-on (FR23), so by default a chat outlives the think-time burst until
@@ -136,10 +136,10 @@ during think-time = healthy. Rising time-in-app = not.
 ### UJ-1 — Marcus, mid-refactor, model is thinking (happy path)
 
 Marcus is knee-deep in a large refactor with Claude Code. He submits a big prompt; the model
-starts working. The plugin's hook fires on prompt submission and drops him into the queue; a "searching"
-spinner appears in the chat pane. Within a few seconds he's paired and a pre-written opener
+starts working. The plugin sees the turn start and drops him into the queue; a "searching"
+spinner appears in the band above his prompt. Within a few seconds he's paired and a pre-written opener
 appears ("What's the last thing that made you laugh?"). They trade a few messages.
-Claude finishes; the `Stop` hook fires; the pane shows "your Claude is back" and the chat
+Claude finishes; the turn completes; the pane shows "your Claude is back" and the chat
 closes (Marcus has persist off). He reads Claude's output and keeps working. Total human
 contact: ~90 seconds. He didn't have to decide to end it.
 
@@ -184,32 +184,30 @@ target.
 
 ### F1 — Think-time detection and session lifecycle
 
-Feasibility investigated (OQ-1, `addendum.md §2`): **buildable via a bundled companion
-process — not as a pure in-conversation pane.** The FRs below reflect the resolved design.
+Feasibility (OQ-1, revised 2026-10-17 — mods pivot, `sprint-change-proposal-2026-10-17.md`):
+**buildable as a Claude Code mod** — in-process plugin UI (Claude Code v2.1.287+) — with no
+companion process. The original companion-TUI design (transcript watching, tmux / new-window pane
+placement) was built in Epics 1–3 and is superseded.
 
-- **FR1.** The chat surface SHALL be a **bundled companion process** (a small TUI) that the
-  plugin launches (on `SessionStart`), holds the websocket to the backend, renders the chat,
-  and takes the user's input. Hooks alone cannot hold a UI.
-- **FR2.** Think-time boundaries SHALL be determined by the companion **watching the Claude
-  Code session transcript** — burst begins when the user's turn starts, ends when the
-  assistant's response completes. The `UserPromptSubmit` and `Stop` hooks MAY provide a
-  secondary signal but SHALL NOT be relied on for timing (`UserPromptSubmit` caps at 30s;
-  `Stop` fires only after the turn). On burst begin the user is entered into the queue; on
-  burst end the active chat ends, unless **persist** is enabled for that user (FR22–FR23).
-- **FR3.** `[ASSUMPTION]` The plugin SHALL treat tool-call boundaries within one turn as the
-  same continuous burst, not new matches, so a single user turn maps to at most one match.
+- **FR1.** The chat surface SHALL be the plugin's **mod**: it draws inside Claude Code (an
+  AbovePrompt band and a docked Pane), holds the client side of the backend connection over HTTPS,
+  renders the chat, and takes the user's input. Nothing runs outside the Claude Code process.
+- **FR2.** Think-time boundaries SHALL come from the mod's **main-loop turn events**: burst begins
+  at `turn.start`, ends at `turn.complete`; subagent turns are ignored. On burst begin the user is
+  entered into the queue; on burst end the active chat ends, unless **persist** is enabled for that
+  user (FR22–FR23).
+- **FR3.** The plugin SHALL treat tool-call boundaries within one turn as the same continuous
+  burst, not new matches, so a single user turn maps to at most one match. (Satisfied natively: one
+  main-loop turn spans all its tool calls.)
 - **FR4.** If a burst ends while the user is still in the queue (never matched), the plugin
   SHALL silently remove them from the queue with no error surfaced.
-- **FR5.** The companion SHALL render **adjacent to the Claude session**: automatically as a
-  `tmux` split pane when the session is inside tmux; otherwise the plugin SHALL print a
-  one-line instruction to open it in a split / pane / window the user controls. Inbound
-  messages render in the companion's own pane — nothing is pushed into the Claude Code TUI.
-- **FR6.** The plugin SHALL be a no-op when the user is not opted in, the companion can't
-  start, or the backend is unreachable — it MUST never block, delay, or error the Claude Code
-  session. `[ASSUMPTION]` where no adjacent placement is possible (some IDE-embedded
-  terminals), the companion still runs and the user places or focuses it manually.
-- **FR6.** The plugin SHALL work as a no-op when the user is not opted in or the backend is
-  unreachable — it MUST never block, delay, or error the user's Claude Code session.
+- **FR5.** The chat SHALL render **inside the Claude Code session**, in the mod's band and pane.
+  There is no external pane, split, or window.
+- **FR6.** The plugin SHALL be a no-op when the user is not opted in or the backend is
+  unreachable, and SHALL never block, delay, or error the Claude Code session. Where mod UI cannot
+  draw (VS Code extension chat panel, Remote Control viewers, `claude -p`, Agent SDK, cloud
+  sessions, Desktop WSL) the plugin SHALL never enter the queue — **no surface, no queue.**
+  `[ACCEPTED LIMITATION, Diego 2026-10-16]`
 
 ### F2 — FIFO matching and queue
 
@@ -393,10 +391,9 @@ process — not as a pure in-conversation pane.** The FRs below reflect the reso
 
 ### Availability and performance
 
-- **NFR6.** `[ASSUMPTION]` A plugin hook SHALL block the Claude Code session for no more than
-  ~50ms: it enqueues the queue-enter / chat-end action asynchronously and returns immediately.
-  It SHALL fail open (FR6) — any hook error or timeout is swallowed and the Claude session
-  proceeds untouched.
+- **NFR6.** No mod hook SHALL await the network or block the Claude Code session; render and
+  turn hooks return promptly and all backend I/O runs in background tasks. Any error is swallowed
+  into a calm offline state (FR6). _(Amended 2026-10-17; was: a hook blocks ≤~50ms.)_
 - **NFR7.** `[ASSUMPTION]` Message relay round-trip SHALL be < ~500ms p90 under normal load.
 - **NFR8.** `[ASSUMPTION]` The backend SHALL target ~99% monthly reachability on a
   best-effort basis — no formal SLA — and SHALL degrade cleanly: an unreachable or erroring
@@ -407,12 +404,12 @@ process — not as a pure in-conversation pane.** The FRs below reflect the reso
 
 ### Security
 
-- **NFR10.** All client↔server traffic SHALL be encrypted in transit (TLS / WSS).
+- **NFR10.** All client↔server traffic SHALL be encrypted in transit (TLS / HTTPS).
 - **NFR11.** The server SHALL treat all message content as untrusted: no rendering of remote
   markup/HTML, link inertness per FR14, input length caps.
-- **NFR12.** The plugin SHALL send its locally stored **account-key UUID** (FR41) with each
-  backend request over the encrypted channel (NFR10); the server treats that UUID as the
-  identity. No identity derivation, no Claude-account linkage, no separate auth handshake in
+- **NFR12.** The plugin SHALL send its locally stored **account-key UUID** (FR41) in `hello`
+  over the encrypted channel (NFR10); later requests carry only the opaque handle minted for it.
+  The server treats that UUID as the identity. No identity derivation, no Claude-account linkage, no separate auth handshake in
   v1. (Consequence — ban/block evasion — is the FR41 `[DESIGN NOTE]`.)
 
 ### Cost and operability
@@ -579,6 +576,10 @@ These touch the plugin and matching backend, not the reconnect webapp. Parked, u
   manual placement elsewhere" — acceptable for a terminal-comfortable audience.** Residual
   detail for the architect: exact transcript-file location and format stability, turn-parse
   edge cases (interrupts, `SubagentStop`), companion↔plugin handshake.
+  **Revised 2026-10-17 (mods pivot):** Claude Code mods (v2.1.287+) supersede findings (a)–(d).
+  Turn events replace transcript watching, and in-process UI replaces the companion pane. The
+  trade is reach: no mod UI on the VS Code chat panel, Remote Control, or headless/cloud runs
+  (FR6).
 - ~~OQ-2 (safety/legal). Age assurance stance.~~ **Resolved:** self-attested 18+ checkbox,
   residual risk accepted and documented (FR44, OQ-A).
 - ~~OQ-3 (auth). Account-linked identity key.~~ **Resolved — not possible, so scoped down.**
@@ -609,9 +610,10 @@ those before/with the architect.
 
 | ID | Assumption |
 |---|---|
-| FR2 | **Watching the session transcript is a reliable way to detect turn start/end** (transcript path/format stable enough). |
+| FR2 | **Main-loop `turn.start` / `turn.complete` reliably bracket a user turn.** |
 | FR3 | **Tool-call boundaries (`PreToolUse`/`PostToolUse`) are treated as one continuous burst → at most one match per user turn.** |
-| FR6 | Where no adjacent pane placement is possible (some IDE terminals), the companion still runs and the user places it manually. |
+| FR6 | No surface ⇒ no queue; reach loss on surfaces where mod UI doesn't draw is accepted. |
+| Mods | **The mods API (early access) stays compatible enough to track per Claude Code release.** |
 | FR9 | **If the two longest waiters are ineligible (block/cooldown), the server skips to the next eligible pair rather than stalling.** |
 | FR12 | Median time-to-match is instrumented server-side and exposed on a maintainer status endpoint. |
 | FR17 | Typing indicators may be shown; read receipts never. |
@@ -627,7 +629,7 @@ those before/with the architect.
 | FR49 | **Keyword filtering is part of reactive moderation** (word list governance = OQ-7). |
 | FR50 | Empty-queue "leave a note for the next person" fallback, after a threshold wait. |
 | NFR2 | IP logs (if any) auto-expire within 24h. |
-| NFR6 | A hook blocks the Claude session ≤ ~50ms; enqueues async. |
+| NFR6 | No mod hook awaits the network; backend I/O runs in background tasks. |
 | NFR7 | Relay round-trip < ~500ms p90. |
 | NFR8 | Backend targets ~99% monthly reachability, best-effort, no SLA. |
 | NFR9 | **Hobby-scale: low hundreds of concurrent users, one small cloud instance.** |
@@ -662,7 +664,7 @@ keystone** (FR13–FR14).
 
 | Term | Meaning |
 |---|---|
-| **Think-time burst** | The stretch from the user submitting a prompt (`UserPromptSubmit`) to the model finishing its response (`Stop`) — the dead time the product fills. Approximate; there is no true "thinking started/stopped" signal (OQ-1). |
+| **Think-time burst** | The stretch from a main-loop `turn.start` to its `turn.complete` — the dead time the product fills. |
 | **Account key** | A random UUID generated once and stored at a stable path outside the plugin dir (FR41), so a plugin reinstall/update keeps it. The single identifier every block, auto-cooldown, ban, and rate limit is keyed to. No Claude-account linkage is possible (platform limit — `addendum.md §2`); the backend only ever sees the UUID. Resettable by deleting the id file, so enforcement is best-effort. Never shown to other users or sent in client-visible payloads. |
 | **Pseudonym** | The display name other users see. Optional, user-set, unconnected to the account key. |
 | **Persist** | A per-user profile toggle (FR22). When on, a chat continues past the think-time burst until the user explicitly leaves. Ships default-on (FR23). |
