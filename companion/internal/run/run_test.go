@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -2592,5 +2593,88 @@ func TestInbandSessionEndedWhileSearchingLeavesSpinnerUp(t *testing.T) {
 	case err := <-h.done:
 		t.Fatalf("loop returned %v on an in-band session_ended; it must keep running", err)
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestSameTickSessionEndedBeforeMatchedLaunchesNewChat covers the ordering
+// hazard Story 3.5 introduces on the backend: a silent re-enqueue can land a
+// fresh matched on the same tick as the session_ended that preceded it on the
+// wire. Both are queued directly on the fake client's channels before loop
+// drains either, so Go's select has no ordering signal to fall back on.
+//
+// Go's select picks uniformly at random among ready cases, so a single run of
+// this race, without the priority check, only fails part of the time
+// (empirically ~35%) — not reliable enough on its own to prove the fix
+// matters (a reviewer measured 13/20 "passes" with the fix manually removed).
+// Running it as `iterations` independent subtests, each with its own fresh
+// harness, and requiring every one to pass, drives the false-negative
+// probability (the fix missing but every iteration happens to land lucky)
+// down to statistically negligible.
+//
+// Without the priority check the new matched can be serviced first, found
+// pm.chatActive() still true from the old chat, and silently dropped by the
+// "ignore a second matched while chat is active" guard — stranding the user on
+// the searching spinner while the backend believes they are already paired
+// again.
+func TestSameTickSessionEndedBeforeMatchedLaunchesNewChat(t *testing.T) {
+	const iterations = 20
+	for i := 0; i < iterations; i++ {
+		t.Run(fmt.Sprintf("iter%d", i), func(t *testing.T) {
+			chatMade := stubChatProgram(t)
+			searchMade := stubSearchProgram(t)
+			h := startLoop(t)
+
+			// The user is still mid-think-time when the old chat ends, so
+			// tearing it down alone would return to the spinner — the
+			// scenario a same-tick rematch needs to race against.
+			h.events <- transcript.Event{Kind: transcript.TurnStart}
+			h.waitSent(t, "ready")
+
+			h.client.matched <- proto.Matched{SessionID: "old"}
+			oldChat := waitChat(t, chatMade)
+
+			// Park loop's own goroutine inside a gated SendState — triggered
+			// by a Connected event, which calls pushState synchronously — so
+			// it is not blocked inside any select when both frames land
+			// below. That is what makes the two sends genuinely simultaneous
+			// from select's point of view: neither channel has a parked
+			// receiver to hand off to directly (which would just commit to
+			// whichever case was signalled first, defeating the race), so
+			// both frames sit in their buffers, unclaimed, until loop returns
+			// to a *fresh* select that must poll every case and pick among
+			// however many are ready.
+			gate := make(chan struct{})
+			entry := make(chan struct{}, 1)
+			h.client.setGate(gate, entry)
+			h.client.events <- wsclient.Event{Kind: wsclient.Connected}
+			select {
+			case <-entry:
+			case <-time.After(2 * time.Second):
+				t.Fatal("loop never reached the gated SendState")
+			}
+
+			// Queue both frames while loop is parked outside any select.
+			h.client.sessEnd <- proto.SessionEnded{}
+			h.client.matched <- proto.Matched{SessionID: "new"}
+
+			h.client.setGate(nil, nil)
+			close(gate)
+
+			select {
+			case <-oldChat.quit:
+			case <-time.After(2 * time.Second):
+				t.Fatal("the old chat was never torn down")
+			}
+
+			// The transient return-to-spinner is torn down again the instant
+			// the new matched is serviced.
+			sf := waitSearch(t, searchMade)
+			waitUntil(t, "the transient spinner torn down for the rematch", sf.quitted)
+
+			newChat := waitChat(t, chatMade)
+			if newChat == oldChat {
+				t.Fatal("no new chat program was constructed for the same-tick rematch")
+			}
+		})
 	}
 }

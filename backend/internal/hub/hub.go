@@ -36,7 +36,11 @@ import (
 // exactly once by the server, from the inbound Hello, before Register is
 // called, and read once by the hub at register time; the hub never writes it.
 // graceTimer is hub-owned and non-nil only while a paired session's teardown is
-// being held open for Story 3.4's reconnect grace window.
+// being held open for Story 3.4's reconnect grace window. WantsMatch is
+// hub-owned: readyCmd sets it true and busyCmd sets it false, unconditionally,
+// before that case's existing logic runs; teardownPair reads it on a
+// session's surviving peer to decide whether to silently re-enqueue that peer
+// (Story 3.5).
 type Session struct {
 	Key      string
 	Conn     *websocket.Conn
@@ -46,6 +50,7 @@ type Session struct {
 	SessionID       string
 	ResumeSessionID string
 	graceTimer      *time.Timer
+	WantsMatch      bool
 }
 
 type command interface{ isCommand() }
@@ -170,6 +175,17 @@ func (h *Hub) Run(ctx context.Context) {
 							p.pairings[cmd.s] = peer
 							p.pairings[peer] = cmd.s
 							cmd.s.SessionID = prev.SessionID
+							// cmd.s is a brand-new *Session (fresh per
+							// websocket connection), so its WantsMatch is
+							// still the zero value false regardless of what
+							// prev's was. Without carrying it over, a
+							// resumed session would silently lose Story
+							// 3.5 eligibility until its own next
+							// Ready/Busy frame — including the exact case
+							// this story exists for: resumed mid-chat, then
+							// the peer goes busy or leaves before the
+							// resumed side sends anything of its own.
+							cmd.s.WantsMatch = prev.WantsMatch
 							resumed = true
 						}
 					} else {
@@ -266,6 +282,11 @@ func (h *Hub) Run(ctx context.Context) {
 					p.drainQueue(eligible)
 				}
 			case readyCmd:
+				// Ready/Busy unconditionally record the session's own latest
+				// signal before anything else runs, so teardownPair's later
+				// re-enqueue decision (Story 3.5) always reads the most recent
+				// intent.
+				cmd.s.WantsMatch = true
 				// Enqueue the longest-waiting-first queue, then try to pair. Only
 				// a session that is newly enqueued (not already queued, not
 				// already paired) gets a queued frame when it is left waiting.
@@ -276,6 +297,7 @@ func (h *Hub) Run(ctx context.Context) {
 					}
 				}
 			case busyCmd:
+				cmd.s.WantsMatch = false
 				// Leaving while queued is silent; leaving while paired tears the
 				// pairing down and notifies the peer. A session is never both.
 				p.removeFromQueue(cmd.s)
@@ -289,8 +311,10 @@ func (h *Hub) Run(ctx context.Context) {
 				// queued is silent, leaving while paired routes teardown through
 				// teardownPair — the sole cause-agnostic session_ended emission
 				// point — so the peer's frame is byte-identical to every other
-				// cause. A session is never both queued and paired. Story 3.5
-				// owns whether the leaver is re-enqueued; here it is not.
+				// cause. A session is never both queued and paired. teardownPair
+				// only ever considers cmd.s's peer for Story 3.5's silent
+				// re-enqueue; the leaver itself (cmd.s) is deliberately never a
+				// candidate.
 				p.removeFromQueue(cmd.s)
 				p.teardownPair(cmd.s)
 				// Re-drain in case the departure unblocks a waiting pair. This is
@@ -362,8 +386,17 @@ func (p *pairingState) removeFromQueue(s *Session) {
 // later epics — ban and reconnect-grace expiry). Because the pairing entry is
 // gone before the frame is delivered, session_ended is the last frame the peer
 // receives for that session and no further chat_msg can be relayed to it.
-// Neither peer is re-enqueued (Story 3.5 owns re-enqueue). A no-op if s is not
-// paired — which is what makes a leave or busy while queued or idle silent.
+//
+// If the peer's own last signal was Ready and it is not itself grace-held, it
+// is silently re-enqueued onto the queue tail (Story 3.5) — p.enqueue, never a
+// Queued frame. Every caller here already re-drains the queue right after,
+// which is what turns this into an immediate rematch when one is available.
+// The graceTimer == nil guard is load-bearing: a grace-held peer is mid its own
+// pending resume (Story 3.4), and overwriting its SessionID with a fresh
+// pairing before that resume can complete would break it. s itself (the caller
+// of teardownPair) is never re-enqueued here — only its peer is a candidate. A
+// no-op if s is not paired — which is what makes a leave or busy while queued
+// or idle silent.
 func (p *pairingState) teardownPair(s *Session) {
 	peer, ok := p.pairings[s]
 	if !ok {
@@ -372,6 +405,9 @@ func (p *pairingState) teardownPair(s *Session) {
 	delete(p.pairings, s)
 	delete(p.pairings, peer)
 	deliver(peer, proto.SessionEnded{})
+	if peer.WantsMatch && peer.graceTimer == nil {
+		p.enqueue(peer)
+	}
 }
 
 // relay hands msg to from's paired peer and to no one else — the sender is never
@@ -508,7 +544,8 @@ func (h *Hub) Busy(s *Session) {
 // Leave tears down s's pairing through the same teardownPair path as Busy — the
 // surviving peer gets a bare session_ended byte-identical to the busy case — or
 // is a silent no-op if s is queued or idle. The leaver is never notified and
-// never re-enqueued (Story 3.5 owns re-enqueue).
+// never re-enqueued: teardownPair only ever considers s's peer as a Story 3.5
+// silent-re-enqueue candidate, deliberately never s itself.
 func (h *Hub) Leave(s *Session) {
 	h.send(leaveCmd{s: s})
 }

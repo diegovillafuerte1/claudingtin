@@ -331,9 +331,59 @@ func loop(
 		pm.showPhase(phaseFor(desired))
 	}
 
+	// handleSessionEnded is the one calm, cause-free end presentation. It is a
+	// named closure, not inline in the select case below, so the priority check
+	// (Story 3.5) at the top of the for loop and the main select's own case run
+	// the exact same logic.
+	handleSessionEnded := func() {
+		// The frame carries no reason and this never branches on one. The
+		// socket stays up — a peer left the chat, not the connection — so loop
+		// keeps running; a real takeover instead lands on clientDone below when
+		// the server closes the socket. No apology, no confirm, no rejection
+		// word anywhere on this path.
+		wasChatting := pm.chatActive()
+		pm.stopChat(false)
+		pm.log("companion: the other chat ended")
+		if desired == stateReady && wasChatting && !pm.anyActive() {
+			// Still mid-think-time: the pane returns to the searching spinner.
+			// The backend may have already silently re-enqueued this session
+			// (Story 3.5), so a rematch can land within the same tick — the
+			// priority check below is what keeps that matched from being
+			// serviced, and silently dropped, ahead of this session_ended. The
+			// !anyActive guard matches the only other launchSearch call site
+			// (launchSearch itself has no idempotency guard).
+			pm.launchSearch()
+		} else {
+			// Model is back, or the frame arrived with no chat to tear down:
+			// land on the calm "their claude's back" line. showPhase is a
+			// no-op while the spinner still owns the pane, so a session_ended
+			// received mid-search leaves the search untouched.
+			pm.showPhase(statusline.PhaseClaudeBack)
+		}
+	}
+
 	var lastWatchErr error
 
 	for {
+		// Priority check (Story 3.5): a same-tick re-pair means session_ended
+		// and the new matched that followed it on the wire can both already be
+		// sitting ready on their separate wsclient channels by the time this
+		// select runs, and Go's select has no ordering guarantee between two
+		// channels that are both already ready. wsclient's read goroutine
+		// dispatches frames in true wire order (decode-then-forward, one frame
+		// at a time), so servicing any pending session_ended here — before the
+		// main select below could instead service the new matched while
+		// pm.chatActive() is still true for the old chat, silently dropping it
+		// via the "ignore a second matched while chat is active" guard —
+		// preserves that order. Non-blocking: with nothing pending it falls
+		// straight through to the main select.
+		select {
+		case <-client.SessionEnded():
+			handleSessionEnded()
+			continue
+		default:
+		}
+
 		select {
 		case <-ctx.Done():
 			pm.stopAll()
@@ -470,29 +520,7 @@ func loop(
 			pm.sendPeer(cm.ClientMsgID, cm.Text)
 
 		case <-client.SessionEnded():
-			// The one calm, cause-free end presentation. The frame carries no
-			// reason and this arm never branches on one. The socket stays up —
-			// a peer left the chat, not the connection — so loop keeps running;
-			// a real takeover instead lands on clientDone below when the server
-			// closes the socket. No apology, no confirm, no rejection word
-			// anywhere on this path.
-			wasChatting := pm.chatActive()
-			pm.stopChat(false)
-			pm.log("companion: the other chat ended")
-			if desired == stateReady && wasChatting && !pm.anyActive() {
-				// Still mid-think-time: the pane returns to the searching
-				// spinner. Story 3.5 owns the backend re-enqueue that resolves
-				// it; until then the spinner just spins. The !anyActive guard
-				// matches the only other launchSearch call site (launchSearch
-				// itself has no idempotency guard).
-				pm.launchSearch()
-			} else {
-				// Model is back, or the frame arrived with no chat to tear
-				// down: land on the calm "their claude's back" line. showPhase
-				// is a no-op while the spinner still owns the pane, so a
-				// session_ended received mid-search leaves the search untouched.
-				pm.showPhase(statusline.PhaseClaudeBack)
-			}
+			handleSessionEnded()
 
 		case om := <-pm.sends():
 			// The chat surface echoed the user's own line optimistically and
@@ -518,7 +546,13 @@ func loop(
 				}
 				fmt.Fprintln(cfg.Err, "companion: leave requested from the chat surface")
 				if desired == stateReady && !pm.anyActive() {
-					pm.launchSearch() // Story 3.5 owns the backend re-enqueue
+					// Local-only display: the backend never re-enqueues an
+					// explicit leaver — teardownPair only ever considers the
+					// surviving peer of a torn-down pairing a Story 3.5
+					// candidate, never the session that called leave. This
+					// just reflects that the user's own think-time is still
+					// live.
+					pm.launchSearch()
 				} else {
 					pm.showPhase(phaseFor(desired))
 				}
