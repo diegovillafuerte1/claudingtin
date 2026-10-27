@@ -1,6 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginState } from 'claude-code'
 import type { Presence } from '../types'
+import { applyEvents, resetChat } from './chat'
+import type { ChatEvent } from './chat'
 import { loadAccountKey } from './identity'
 import { requireGate } from './safety'
 
@@ -52,7 +54,7 @@ function setLink($: EngineInterface, fn: (l: Link) => Link): Promise<unknown> {
   return update($, link, (l) => fn({ ...INITIAL, ...l }))
 }
 
-async function getLink($: EngineInterface): Promise<Link> {
+export async function getLink($: EngineInterface): Promise<Link> {
   return { ...INITIAL, ...(await read($, link)) }
 }
 
@@ -77,6 +79,8 @@ export async function onTurnEnd($: EngineInterface, base: string): Promise<void>
   } catch {
     return
   }
+  // Own Claude is back: the chat ends here (busy tells the peer).
+  await resetChat($)
   void work($, base)
 }
 
@@ -280,24 +284,32 @@ async function pollLoop($: EngineInterface, base: string, gen: number, handle: s
     if (res?.status === 410) {
       // Superseded (another session took the key): quiet until the next turn.start.
       await setLink($, (s) => (s.handle === handle ? { ...s, handle: null, after: 0, sent: null, quiet: true } : s))
+      await resetChat($)
       return
     }
     if (res?.status === 400) {
       // `after` beyond this handle's last event: start its count afresh.
       await setLink($, (s) => (s.handle === handle && s.gen === gen ? { ...s, after: 0 } : s))
     }
-    const seqs = res !== undefined && res.status === 200 ? parseSeqs(res.text) : undefined
-    if (seqs === undefined) {
+    const events = res !== undefined && res.status === 200 ? parseEvents(res.text) : undefined
+    if (events === undefined) {
       backoff = backoff === 0 ? BACKOFF_MIN_MS : Math.min(backoff * 2, BACKOFF_MAX_MS)
       await $.clock.sleep(backoff)
       continue
     }
     backoff = 0
-    const fresh = seqs.filter((n) => n > now.after)
+    // A burst that ended (or a reset) while the request was out: this reply is
+    // stale, so nothing is applied and nothing acked.
+    if (!polling(now)) return
+    // New seqs only, once each, oldest first: applied (each failure quiet), then acked.
+    const seen = new Set<number>()
+    const fresh = events
+      .filter((ev) => ev.seq > now.after && !seen.has(ev.seq) && (seen.add(ev.seq), true))
+      .sort((a, b) => a.seq - b.seq)
     if (fresh.length > 0) {
-      const max = fresh.reduce((m, n) => (n > m ? n : m), now.after)
+      await applyEvents($, fresh)
+      const max = fresh[fresh.length - 1]!.seq
       await setLink($, (s) => (s.handle === handle && s.gen === gen && max > s.after ? { ...s, after: max } : s))
-      // 7.5 renders these; 7.4 only acks them.
     } else {
       // Nothing new (empty, or only seqs already seen): pace, never spin.
       await $.clock.sleep(EMPTY_PACE_MS)
@@ -305,8 +317,12 @@ async function pollLoop($: EngineInterface, base: string, gen: number, handle: s
   }
 }
 
-/** The `seq` of each event in a bare JSON array; `undefined` when the body is not one. */
-export function parseSeqs(text: string): number[] | undefined {
+/**
+ * The events of a bare JSON array, each `{ seq, type, ...raw }`; one without a
+ * positive whole `seq` is skipped, a missing `type` reads ''. `undefined` when
+ * the body is not an array.
+ */
+export function parseEvents(text: string): ChatEvent[] | undefined {
   let v: unknown
   try {
     v = JSON.parse(text)
@@ -314,11 +330,14 @@ export function parseSeqs(text: string): number[] | undefined {
     return undefined
   }
   if (!Array.isArray(v)) return undefined
-  const out: number[] = []
+  const out: ChatEvent[] = []
   for (const e of v) {
-    if (e === null || typeof e !== 'object') continue
-    const seq = (e as { seq?: unknown }).seq
-    if (typeof seq === 'number' && Number.isSafeInteger(seq) && seq > 0) out.push(seq)
+    if (e === null || typeof e !== 'object' || Array.isArray(e)) continue
+    const raw = e as Record<string, unknown>
+    const seq = raw.seq
+    if (typeof seq === 'number' && Number.isSafeInteger(seq) && seq > 0) {
+      out.push({ ...raw, seq, type: typeof raw.type === 'string' ? raw.type : '' })
+    }
   }
   return out
 }
@@ -387,10 +406,45 @@ async function hello($: EngineInterface, base: string, key: string): Promise<Hel
 }
 
 function send($: EngineInterface, base: string, handle: string, type: Presence): Promise<Res | undefined> {
+  return postMsg($, base, handle, { type, v: 1 })
+}
+
+/** POST /v1/send with one client message; abandoned past SEND_TIMEOUT_MS. Never rejects. */
+function postMsg($: EngineInterface, base: string, handle: string, body: Record<string, unknown>): Promise<Res | undefined> {
   return request(
     $,
     `${base}/v1/send`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json', [HANDLE_HEADER]: handle }, body: JSON.stringify({ type, v: 1 }) },
+    { method: 'POST', headers: { 'Content-Type': 'application/json', [HANDLE_HEADER]: handle }, body: JSON.stringify(body) },
     SEND_TIMEOUT_MS,
   )
+}
+
+/**
+ * Sends one client message (chat_msg, leave, block, report) on the current
+ * handle, without waiting on the network: no handle, nothing sent. Resolves
+ * once the request is dispatched; every failure is quiet. Never rejects.
+ */
+/**
+ * Sends client messages in order, each after the previous one settled, on the
+ * handle read once; no handle, nothing sent. A failure does not stop the next.
+ * Meant to be voided by the caller. Never rejects.
+ */
+export async function sendSeqNow($: EngineInterface, base: string, bodies: readonly Record<string, unknown>[]): Promise<void> {
+  try {
+    const { handle } = await getLink($)
+    if (handle === null) return
+    for (const body of bodies) await postMsg($, base, handle, body)
+  } catch {
+    // Quiet.
+  }
+}
+
+export async function sendNow($: EngineInterface, base: string, body: Record<string, unknown>): Promise<void> {
+  try {
+    const { handle } = await getLink($)
+    if (handle === null) return
+    void postMsg($, base, handle, body)
+  } catch {
+    // Quiet.
+  }
 }
