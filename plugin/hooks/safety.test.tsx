@@ -321,7 +321,7 @@ test('companion files carry over: no pane, key untouched, only /status fetched',
   expect(log.runs).toContainEqual(['chmod', '600', KEY])
   expect(log.fetches).toEqual(['GET http://127.0.0.1:8080/status'])
   expect(log.said.join('')).not.toContain(VALID)
-  expect(log.commands).toEqual([expect.objectContaining({ name: 'claudingtin', argumentHint: 'safety' })])
+  expect(log.commands).toEqual([expect.objectContaining({ name: 'claudingtin', argumentHint: 'chat|leave|block|report|safety' })])
 })
 
 test('first run (no ack, no key): ack absent → key file not created before acceptance', async ($, on) => {

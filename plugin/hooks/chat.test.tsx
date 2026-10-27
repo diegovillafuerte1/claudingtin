@@ -1,0 +1,679 @@
+import { test, expect, mock } from 'claude-code/testing'
+import { applyEvents, capText, chatBand, inert, onChatClose, oneLine, submitLine } from './chat'
+
+// Story 7.5: the chat surface, through the plugin's own hooks with the world
+// mocked beneath it. The harness is link.test.ts's `start`, plus a pane log
+// and an events feed the test answers poll by poll.
+
+const HOME = '/Users/a'
+const DIR = `${HOME}/Library/Application Support/claudingtin`
+const ACK = `${DIR}/safety-ack`
+const KEY_PATH = `${DIR}/account-key`
+const KEY = '0f8fad5b-d9cb-469f-a165-70867728950e'
+const ACK_V1 = 'version 1\naccepted_at 1700000000000\n'
+const BASE = 'http://x.test'
+const HANDLE = 'h-3k9QmZ2pXv7Lw0aB'
+
+type Req = { method: string; url: string; headers: Record<string, string>; body?: string }
+type Reply = { status: number; text?: string } | Promise<{ status: number; text?: string }> | 'throw'
+type Router = (r: Req, n: number) => Reply
+
+type World = {
+  send?: Router
+  // Each events poll waits until the test feeds it; `events` overrides.
+  events?: Router
+  // What each $.ui.open answers, by call number (1-based); default placed.
+  open?: (n: number) => { isPlaced: true } | { isPlaced: false; reason: string } | 'throw'
+}
+
+const welcome = (handle = HANDLE) => ({ status: 200, text: JSON.stringify({ handle, type: 'welcome', v: 1 }) })
+const never = () => new Promise<never>(() => {})
+
+const engineRender = ($: any, e: any) => {
+  const { Text } = $.ui.resolve(e)
+  return h(Text, { key: 'engine' }, 'engine')
+}
+declare const h: any
+
+const BAND = {
+  plugin: 'claudingtin',
+  surface: 'terminal',
+  component: 'AbovePrompt',
+  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { top: 0, bodyRows: 9 } as any, view: {} as any },
+} as const
+
+const PANE = {
+  plugin: 'claudingtin',
+  surface: 'terminal',
+  component: 'Pane',
+  requestId: 'claudingtin-chat',
+  props: { title: 'claudingtin', isFocused: true, bodyColumns: 80, placement: 'inline', scroll: { offset: 0, bodyRows: 30 } as any, view: {} as any },
+} as const
+
+async function start($: any, on: any, w: World = {}) {
+  mountedPane = null
+  const clock = mock.clock(on, { now: 1700000000999 })
+  mock.env(on, { HOME })
+  const files = new Map(Object.entries({ [ACK]: ACK_V1, [KEY_PATH]: KEY + '\n' }))
+  const log: Req[] = []
+  const opens: any[] = []
+  const closes: any[] = []
+  const said: string[] = []
+  const counts: Record<string, number> = {}
+  const polls: Array<(v: { status: number; text?: string }) => void> = []
+  on('fs.read', async (_$: any, e: any) => {
+    if (!files.has(e.path)) throw new Error('ENOENT')
+    return { value: files.get(e.path) }
+  })
+  on('fs.exists', (_$: any, e: any) => ({ value: files.has(e.path) || e.path === `${HOME}/Library/Application Support` }))
+  on('fs.write', (_$: any, e: any) => {
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('session.surfaces', () => ({ value: ['terminal'] }))
+  on('http.fetch', async (_$: any, e: any) => {
+    const url: string = e.url
+    const r: Req = { method: e.init?.method ?? 'GET', url, headers: { ...(e.init?.headers ?? {}) }, body: e.init?.body }
+    const path = url.replace(BASE, '').replace(/\?.*$/, '')
+    let route: Router
+    if (path === '/status') route = () => ({ status: 200 })
+    else {
+      log.push(r)
+      if (path === '/v1/hello') route = () => welcome()
+      else if (path === '/v1/send') route = w.send ?? (() => ({ status: 204 }))
+      else if (path === '/v1/events') route = w.events ?? (() => new Promise((res) => polls.push(res)))
+      else route = () => ({ status: 404 })
+    }
+    counts[path] = (counts[path] ?? 0) + 1
+    const reply = await route(r, counts[path]!)
+    if (reply === 'throw') throw new Error('ECONNREFUSED')
+    return { value: { status: reply.status, ok: reply.status >= 200 && reply.status < 300, headers: {}, text: reply.text ?? '' } }
+  })
+  on('ui.render', engineRender)
+  let openN = 0
+  on('ui.open', (_$: any, e: any) => {
+    opens.push({ ...e })
+    const a = w.open?.(++openN) ?? { isPlaced: true }
+    if (a === 'throw') throw new Error('no surface')
+    return { value: a }
+  })
+  on('ui.close', (_$: any, e: any) => {
+    closes.push({ id: e.id, origin: e.origin?.kind })
+    return { value: undefined }
+  })
+  on('ui.panes', () => ({ value: [] }))
+  for (const ev of ['ui.log', 'ui.status', 'ui.toast', 'ui.notice']) {
+    on(ev, (_$: any, e: any) => {
+      said.push(JSON.stringify(e))
+      return { value: undefined }
+    })
+  }
+  on('command.register', (_$: any, e: any) => ({ value: { command: e.name } }))
+  on('session.start', (_$: any, e: any) => e as any)
+  on('turn.start', (_$: any, e: any) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  await $.session.start({ cwd: '/tmp', source: 'startup' })
+  await clock.settle()
+  await $.ui.mount(BAND as any)
+  await clock.settle()
+
+  // Answers the oldest waiting events poll with these events.
+  const feed = async (events: unknown[]) => {
+    const res = polls.shift()
+    if (!res) throw new Error('no events poll waiting')
+    res({ status: 200, text: JSON.stringify(events) })
+    await clock.settle()
+  }
+  const failPoll = async (reply: { status: number; text?: string }) => {
+    const res = polls.shift()
+    if (!res) throw new Error('no events poll waiting')
+    res(reply)
+    await clock.settle()
+  }
+  return { clock, log, opens, closes, said, feed, failPoll }
+}
+
+let turnN = 0
+let lastTurn = ''
+async function turnStart($: any, clock: any) {
+  const turnId = `t${++turnN}`
+  lastTurn = turnId
+  await $.turn.start({ text: 'hi', turnId })
+  await clock.settle()
+}
+async function turnEnd($: any, clock: any) {
+  await $.turn.complete({ answer: '', durationMs: 1, turnId: lastTurn, isAborted: false, reason: 'answer' })
+  await clock.settle()
+}
+
+const lines = (log: Req[]) =>
+  log.map((r) => {
+    const path = r.url.replace(BASE, '')
+    if (path.startsWith('/v1/send')) return `send ${JSON.parse(r.body!).type}`
+    if (path.startsWith('/v1/hello')) return 'hello'
+    return `events ${path.replace('/v1/events', '')}`
+  })
+const sends = (log: Req[]) => log.filter((r) => r.url.endsWith('/v1/send')).map((r) => JSON.parse(r.body!))
+
+async function bandText($: any): Promise<string | undefined> {
+  const ui = await $.ui.mount(BAND as any)
+  return (await ui.find({ type: 'Text' }))?.text
+}
+// One Pane instance per test: mounted once, then drawn again with these props.
+let mountedPane: any = null
+async function pane($: any, bodyRows = 30) {
+  const props = { ...PANE.props, scroll: { offset: 0, bodyRows } }
+  if (mountedPane) await mountedPane.redraw(props)
+  else mountedPane = await $.ui.mount({ ...PANE, props } as any)
+  return mountedPane
+}
+const texts = async (ui: any) => (await ui.findAll({ type: 'Text' })).map((t: any) => t.text)
+
+const runCommand = ($: any, args: string) =>
+  $.command.run({ command: 'claudingtin', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+
+const MATCHED = { seq: 2, type: 'matched', v: 1, session_id: 's-1', pseudonym: 'Ana', blurb: 'likes owls', opener: 'what are you building?' }
+
+// Into a burst, queued, then matched (flourish played out).
+async function matched($: any, on: any, w: World = {}) {
+  const s = await start($, on, w)
+  await turnStart($, s.clock)
+  await s.feed([{ seq: 1, type: 'queued', v: 1 }])
+  await s.feed([MATCHED])
+  await s.clock.advance(600)
+  return s
+}
+
+const X = { options: { backendUrl: BASE } }
+
+// ---------------------------------------------------------------------------
+// Text safety.
+
+test('inert: keeps \\n and ZWJ; drops C0, DEL, C1, format, separators; lone surrogate -> U+FFFD', async () => {
+  expect(inert('a\nb')).toBe('a\nb')
+  expect(inert('\u{1f468}\u200d\u{1f469}')).toBe('\u{1f468}\u200d\u{1f469}')
+  expect(inert('a\x1b[31mb\x07c\x7fd\x85e\x00f\rg\th')).toBe('a[31mbcdefgh')
+  expect(inert('x\u202ey\u200bz\u2028w\u2029v\ue000u\ufeff')).toBe('xyzwvu')
+  expect(inert('a\ud800b')).toBe('a\ufffdb')
+  expect(inert('a\udc00')).toBe('a\ufffd')
+  expect(inert('nb\u00a0sp \u00e9 \u{1f600}')).toBe('nb\u00a0sp \u00e9 \u{1f600}')
+  expect(inert('\x1b]8;;http://x\x07[a](b)<i>')).toBe(']8;;http://x[a](b)<i>')
+  expect(inert(42)).toBe('')
+  expect(oneLine(' Ana\nthe\r\nowl ')).toBe('Ana the owl')
+})
+
+test('capText: 2000 code points', async () => {
+  expect(capText('a'.repeat(2500)).length).toBe(2000)
+  expect(Array.from(capText('\u{1f600}'.repeat(2100))).length).toBe(2000)
+  expect(capText('hi')).toBe('hi')
+})
+
+// ---------------------------------------------------------------------------
+// The matrix.
+
+test('queued: band shows the animated spinner, no position, ETA or count', X, async ($, on) => {
+  const { clock, feed } = await start($, on)
+  await turnStart($, clock)
+  expect(await bandText($)).toBe('claudingtin · connected')
+  await feed([{ seq: 1, type: 'queued', v: 1 }])
+  const a = await bandText($)
+  expect(a).toMatch(/^. looking for someone$/)
+  await clock.advance(100)
+  const b = await bandText($)
+  expect(b).toMatch(/^. looking for someone$/)
+  expect(b).not.toBe(a)
+  expect(b).not.toMatch(/\d/)
+})
+
+test('matched: flourish in the band, then the Pane opens focused with header, blurb, opener, buttons', X, async ($, on) => {
+  const { clock, feed, opens } = await start($, on)
+  await turnStart($, clock)
+  await feed([{ seq: 1, type: 'queued', v: 1 }])
+  await feed([MATCHED])
+  expect(opens).toContainEqual({ id: 'claudingtin-chat', title: 'claudingtin', focus: true, rows: 16 })
+  expect(await bandText($)).toBe('◐  here we go')
+  await clock.advance(90)
+  expect(await bandText($)).toBe('◓  here we go')
+  await clock.advance(450)
+  // Six frames at 90 ms, then the status line (placed: no hint).
+  expect(await bandText($)).toBe('claudingtin · connected')
+  const ui = await pane($)
+  const t = await texts(ui)
+  expect(t).toContain("you're chatting with Ana")
+  expect(t).toContain('likes owls')
+  expect(t).toContain('what are you building?')
+  for (const key of ['leave', 'block', 'report']) expect(await ui.find({ type: 'Button', key })).toBeTruthy()
+  expect((await ui.find({ key: 'leave' }))?.props).toMatchObject({ label: "my claude's back" })
+  expect((await ui.find({ type: 'Input' }))?.props).toMatchObject({ placeholder: 'say something' })
+})
+
+test('matched without a pseudonym: header says someone new', X, async ($, on) => {
+  const { clock, feed } = await start($, on)
+  await turnStart($, clock)
+  await feed([{ ...MATCHED, pseudonym: '\x1b ', blurb: '' }])
+  const t = await texts(await pane($))
+  expect(t).toContain("you're chatting with someone new")
+})
+
+for (const [name, open] of [
+  ['not placed', () => ({ isPlaced: false, reason: 'narrow' })],
+  ['open throws', () => 'throw'],
+] as const) {
+  test(`narrow (${name}): band hints /claudingtin chat, which opens it`, X, async ($, on) => {
+    let n = 0
+    const { clock, opens } = await matched($, on, { open: () => (++n === 1 ? (open() as any) : { isPlaced: true }) })
+    expect(await bandText($)).toBe('claudingtin · chatting with Ana — /claudingtin chat')
+    const out = await runCommand($, 'chat')
+    expect(out?.text).toBe(undefined)
+    expect(opens.length).toBe(2)
+    expect(opens[1]).toMatchObject({ id: 'claudingtin-chat', focus: true })
+    await clock.settle()
+    expect(await bandText($)).toBe('claudingtin · connected')
+  })
+}
+
+test('/claudingtin chat with no chat: a calm line', X, async ($, on) => {
+  await start($, on)
+  expect((await runCommand($, 'chat'))?.text).toBe('no chat going right now.')
+})
+
+test('peer line: appended while chatting; one before the match is dropped; unknown types ignored', X, async ($, on) => {
+  const { clock, feed } = await start($, on)
+  await turnStart($, clock)
+  await feed([{ seq: 1, type: 'chat_msg', v: 1, client_msg_id: 'x', text: 'too early' }, { seq: 2, type: 'blocklist', v: 1 }])
+  await feed([{ ...MATCHED, seq: 3 }])
+  await feed([{ seq: 4, type: 'chat_msg', v: 1, client_msg_id: 'p1', text: 'hello there' }])
+  const t = await texts(await pane($))
+  expect(t).toContain('them  hello there')
+  expect(t.join('\n')).not.toContain('too early')
+})
+
+test('events apply in ascending seq order (a batch out of order)', X, async ($, on) => {
+  const { clock, feed, log } = await start($, on)
+  await turnStart($, clock)
+  await feed([{ seq: 3, type: 'chat_msg', v: 1, client_msg_id: 'p1', text: 'after the match' }, MATCHED])
+  expect(await texts(await pane($))).toContain('them  after the match')
+  expect(lines(log).at(-1)).toBe('events ?after=3')
+})
+
+test('send: trimmed self line at once, then POST /v1/send chat_msg', X, async ($, on) => {
+  const { log } = await matched($, on)
+  const ui = await pane($)
+  await ui.input({ key: 'claudingtin-input', text: '  hi ' })
+  expect(await texts(await pane($))).toContain('you  hi')
+  const s = sends(log).filter((m) => m.type === 'chat_msg')
+  expect(s).toEqual([{ type: 'chat_msg', v: 1, client_msg_id: expect.any(String), text: 'hi' }])
+  expect(s[0].client_msg_id).toMatch(/^[0-9a-f-]{36}$/)
+  const sent = log.filter((r) => r.url.endsWith('/v1/send')).at(-1)!
+  expect(sent.headers['X-Claudingtin-Handle']).toBe(HANDLE)
+  // Each line its own id.
+  await ui.input({ key: 'claudingtin-input', text: 'again' })
+  const ids = sends(log).filter((m) => m.type === 'chat_msg').map((m) => m.client_msg_id)
+  expect(new Set(ids).size).toBe(2)
+})
+
+test('send: empty after trim sends nothing', X, async ($, on) => {
+  const { log } = await matched($, on)
+  const before = log.length
+  await (await pane($)).input({ key: 'claudingtin-input', text: '   \n ' })
+  expect(log.length).toBe(before)
+})
+
+test('send: capped at 2000 code points on change and on submit', X, async ($, on) => {
+  const { log } = await matched($, on)
+  const ui = await pane($)
+  const r = await ui.input({ key: 'claudingtin-input', text: 'a'.repeat(2500), kind: 'change' })
+  expect(r?.value.length).toBe(2000)
+  await ui.input({ key: 'claudingtin-input', text: '\u{1f600}'.repeat(2100) })
+  const m = sends(log).find((x) => x.type === 'chat_msg')!
+  expect(Array.from(m.text as string).length).toBe(2000)
+})
+
+test('send fails: the line stays, nothing shown', X, async ($, on) => {
+  const { log, said } = await matched($, on, { send: (r) => (JSON.parse(r.body!).type === 'chat_msg' ? 'throw' : { status: 204 }) })
+  await (await pane($)).input({ key: 'claudingtin-input', text: 'still here' })
+  expect(await texts(await pane($))).toContain('you  still here')
+  expect(sends(log).some((m) => m.type === 'chat_msg')).toBe(true)
+  expect(said).toEqual([])
+})
+
+test('peer ended mid-burst: ended line only in the Pane, band back to searching', X, async ($, on) => {
+  const { feed, closes } = await matched($, on)
+  await feed([{ seq: 3, type: 'chat_msg', v: 1, client_msg_id: 'p1', text: 'bye' }])
+  await feed([{ seq: 4, type: 'session_ended', v: 1 }])
+  const ui = await pane($)
+  expect(await texts(ui)).toEqual(["looks like their claude's back — catch you later"])
+  expect(await ui.findAll({ type: 'Button' })).toEqual([])
+  expect(await bandText($)).toMatch(/^. looking for someone$/)
+  expect(closes.filter((c) => c.id === 'claudingtin-chat')).toEqual([])
+  // Nothing to leave now.
+  expect((await runCommand($, 'leave'))?.text).toBe('no chat going right now.')
+})
+
+test('session_ended while not chatting is ignored', X, async ($, on) => {
+  const { clock, feed } = await start($, on)
+  await turnStart($, clock)
+  await feed([{ seq: 1, type: 'queued', v: 1 }, { seq: 2, type: 'session_ended', v: 1 }])
+  expect(await texts(await pane($))).toEqual(['no chat going right now.'])
+  expect(await bandText($)).toMatch(/looking for someone/)
+})
+
+test('leave (button): exactly one leave, chat cleared, Pane closed, searching while the burst lasts', X, async ($, on) => {
+  const { log, closes, clock } = await matched($, on)
+  const ui = await pane($)
+  await ui.press({ key: 'leave' })
+  await clock.settle()
+  expect(sends(log).filter((m) => m.type === 'leave')).toEqual([{ type: 'leave', v: 1 }])
+  expect(closes).toContainEqual({ id: 'claudingtin-chat', origin: 'plugin' })
+  expect(await texts(await pane($))).toEqual(['no chat going right now.'])
+  expect(await bandText($)).toMatch(/^. looking for someone$/)
+  // Again: nothing more is sent.
+  expect((await runCommand($, 'leave'))?.text).toBe('no chat going right now.')
+  expect(sends(log).filter((m) => m.type === 'leave').length).toBe(1)
+})
+
+test('leave (command) while chatting: one leave, no line', X, async ($, on) => {
+  const { log } = await matched($, on)
+  expect((await runCommand($, 'leave'))?.text).toBe(undefined)
+  expect(sends(log).filter((m) => m.type === 'leave').length).toBe(1)
+})
+
+test('leave with no chat: a calm line, nothing sent', X, async ($, on) => {
+  const { log } = await start($, on)
+  expect((await runCommand($, 'leave'))?.text).toBe('no chat going right now.')
+  expect((await runCommand($, 'block'))?.text).toBe('no chat going right now.')
+  expect((await runCommand($, 'report'))?.text).toBe('no chat going right now.')
+  expect(log).toEqual([])
+})
+
+for (const [kind, via] of [
+  ['block', 'button'],
+  ['block', 'command'],
+  ['report', 'button'],
+  ['report', 'command'],
+] as const) {
+  test(`${kind} (${via}): ${kind} once, then exactly one leave`, X, async ($, on) => {
+    const { log, closes, clock } = await matched($, on)
+    if (via === 'button') await (await pane($)).press({ key: kind })
+    else await runCommand($, kind)
+    await clock.settle()
+    const s = sends(log).filter((m) => m.type !== 'ready')
+    expect(s).toEqual([kind === 'block' ? { type: 'block', v: 1 } : { type: 'report', v: 1, last_n: 5 }, { type: 'leave', v: 1 }])
+    expect(closes).toContainEqual({ id: 'claudingtin-chat', origin: 'plugin' })
+  })
+}
+
+test('own Claude back: chat reset, Pane closed, busy sent', X, async ($, on) => {
+  const { clock, log, closes } = await matched($, on)
+  await turnEnd($, clock)
+  expect(closes).toContainEqual({ id: 'claudingtin-chat', origin: 'plugin' })
+  expect(lines(log).at(-1)).toBe('send busy')
+  expect(sends(log).some((m) => m.type === 'leave')).toBe(false)
+  expect(await texts(await pane($))).toEqual(['no chat going right now.'])
+  expect(await bandText($)).toBe('claudingtin · connected')
+})
+
+test('handle lost (events 410): chat reset, Pane closed', X, async ($, on) => {
+  const { failPoll, closes } = await matched($, on)
+  await failPoll({ status: 410 })
+  expect(closes).toContainEqual({ id: 'claudingtin-chat', origin: 'plugin' })
+  expect(await texts(await pane($))).toEqual(['no chat going right now.'])
+  expect(await bandText($)).toBe('claudingtin · connected')
+})
+
+test('poll gap: an error and its backoff change nothing visible', X, async ($, on) => {
+  const { failPoll, clock, closes } = await matched($, on)
+  const before = await texts(await pane($))
+  const band = await bandText($)
+  await failPoll({ status: 503 })
+  await clock.advance(500)
+  expect(await texts(await pane($))).toEqual(before)
+  expect(await bandText($)).toBe(band)
+  expect(closes).toEqual([])
+})
+
+test('hot reload while searching: the spinner ticks again', X, async ($, on) => {
+  const { clock, feed } = await start($, on)
+  await turnStart($, clock)
+  await feed([{ seq: 1, type: 'queued', v: 1 }])
+  await ($ as any).session.start({ cwd: '/tmp', source: 'startup' })
+  await clock.settle()
+  const a = await bandText($)
+  expect(a).toMatch(/looking for someone/)
+  await clock.advance(100)
+  const b = await bandText($)
+  expect(b).toMatch(/looking for someone/)
+  expect(b).not.toBe(a)
+})
+
+test('hot reload while chatting: the Pane redraws from state', X, async ($, on) => {
+  const { feed, clock } = await matched($, on)
+  await feed([{ seq: 3, type: 'chat_msg', v: 1, client_msg_id: 'p1', text: 'still here?' }])
+  await ($ as any).session.start({ cwd: '/tmp', source: 'startup' })
+  await clock.settle()
+  const t = await texts(await pane($))
+  expect(t).toContain("you're chatting with Ana")
+  expect(t).toContain('them  still here?')
+})
+
+test('hostile text: drawn as Text with ESC/BEL removed, markup literal; no Markdown, Link or Code', X, async ($, on) => {
+  const { clock, feed } = await start($, on)
+  await turnStart($, clock)
+  await feed([
+    { ...MATCHED, pseudonym: '\x1b[31mEve\x07\n**x**', blurb: '<b>hi</b>\n\x9bsecond', opener: '[o](http://o)' },
+  ])
+  await feed([{ seq: 3, type: 'chat_msg', v: 1, client_msg_id: 'p1', text: '\x1b]8;;http://x\x07[a](b)<i>' }])
+  const ui = await pane($)
+  const t = await texts(ui)
+  expect(t).toContain('them  ]8;;http://x[a](b)<i>')
+  expect(t).toContain("you're chatting with [31mEve **x**")
+  expect(t).toContain('<b>hi</b> second')
+  expect(t).toContain('[o](http://o)')
+  for (const type of ['Markdown', 'Link', 'Code']) expect(await ui.findAll({ type })).toEqual([])
+  expect(JSON.stringify(await ui.drawn())).not.toMatch(/\\u001b|\\u0007/)
+})
+
+test('buttons in every chatting render; history keeps the newest 200 lines', X, async ($, on) => {
+  const { feed } = await matched($, on)
+  const buttons = async (ui: any) => (await ui.findAll({ type: 'Button' })).map((b: any) => b.key)
+  expect(await buttons(await pane($))).toEqual(['leave', 'block', 'report'])
+  const batch = Array.from({ length: 205 }, (_, i) => ({ seq: 3 + i, type: 'chat_msg', v: 1, client_msg_id: `p${i}`, text: `m${i}` }))
+  await feed(batch)
+  let ui = await pane($, 1000)
+  expect(await buttons(ui)).toEqual(['leave', 'block', 'report'])
+  const peer = (await texts(ui)).filter((x: string) => x.startsWith('them  '))
+  expect(peer.length).toBe(200)
+  expect(peer[0]).toBe('them  m5')
+  expect(peer.at(-1)).toBe('them  m204')
+  await ui.input({ key: 'claudingtin-input', text: 'mine' })
+  // A short pane draws only the newest lines that fit; header and buttons stay.
+  ui = await pane($, 8)
+  expect(await buttons(ui)).toEqual(['leave', 'block', 'report'])
+  const t = await texts(ui)
+  expect(t).toContain("you're chatting with Ana")
+  expect(t.at(-1)).toBe('you  mine')
+  expect(t.length).toBeLessThan(10)
+})
+
+test('hung backend: submit and leave resolve without waiting on the fetch', X, async ($, on) => {
+  const { log, clock } = await matched($, on, { send: (r) => (JSON.parse(r.body!).type === 'ready' ? { status: 204 } : never()) })
+  const ui = await pane($)
+  await ui.input({ key: 'claudingtin-input', text: 'anyone?' })
+  expect(await texts(await pane($))).toContain('you  anyone?')
+  await ui.press({ key: 'leave' })
+  expect(sends(log).map((m) => m.type)).toEqual(['ready', 'chat_msg', 'leave'])
+  await clock.advance(60000)
+  expect(sends(log).filter((m) => m.type === 'leave').length).toBe(1)
+})
+
+test('chat text travels only in a chat_msg body; peer text never leaves', X, async ($, on) => {
+  const { log, feed, said, clock } = await matched($, on)
+  await feed([{ seq: 3, type: 'chat_msg', v: 1, client_msg_id: 'p1', text: 'zebra-peer' }])
+  await (await pane($)).input({ key: 'claudingtin-input', text: 'zebra-self' })
+  await runCommand($, 'report')
+  await turnEnd($, clock)
+  for (const r of log) {
+    const isChat = r.body !== undefined && JSON.parse(r.body).type === 'chat_msg'
+    const all = JSON.stringify(r)
+    expect(all).not.toContain('zebra-peer')
+    if (!isChat) expect(all).not.toContain('zebra-self')
+  }
+  expect(said.join('')).not.toMatch(/zebra|owls|Ana/)
+})
+
+// ---------------------------------------------------------------------------
+// Review patches.
+
+test('matched: an open that never settles does not stall polling; the next chat_msg applies', X, async ($, on) => {
+  const { clock, feed, opens } = await start($, on, { open: () => never() as any })
+  await turnStart($, clock)
+  await feed([MATCHED])
+  expect(opens.length).toBe(1)
+  await feed([{ seq: 3, type: 'chat_msg', v: 1, client_msg_id: 'p1', text: 'are you there' }])
+  expect(await texts(await pane($))).toContain('them  are you there')
+  // Never placed: the band offers the chat once the flourish is done.
+  await clock.advance(600)
+  expect(await bandText($)).toBe('claudingtin · chatting with Ana — /claudingtin chat')
+})
+
+test('peer ids never key the drawing: a repeated client_msg_id, one equal to a self id', X, async ($, on) => {
+  const { feed, log } = await matched($, on)
+  await (await pane($)).input({ key: 'claudingtin-input', text: 'mine' })
+  const selfId = sends(log).find((m) => m.type === 'chat_msg')!.client_msg_id
+  await feed([
+    { seq: 3, type: 'chat_msg', v: 1, client_msg_id: selfId, text: 'one' },
+    { seq: 4, type: 'chat_msg', v: 1, client_msg_id: selfId, text: 'two' },
+  ])
+  const ui = await pane($)
+  const t = await texts(ui)
+  for (const x of ['you  mine', 'them  one', 'them  two']) expect(t).toContain(x)
+  expect(t.filter((x: string) => /^(you|them)  /.test(x)).length).toBe(3)
+})
+
+test('line ids (the drawing keys) stay unique whatever client_msg_id a peer sends', async () => {
+  // The drawn tree does not carry Text keys, so this reads the ids they come from.
+  const { $, chatState } = fakeChat$()
+  await applyEvents($, [MATCHED as any])
+  await submitLine($, BASE, 'mine')
+  const selfId: string = chatState().lines[0].id
+  await applyEvents($, [
+    { seq: 3, type: 'chat_msg', client_msg_id: selfId, text: 'one' },
+    { seq: 4, type: 'chat_msg', client_msg_id: selfId, text: 'two' },
+    { seq: 5, type: 'chat_msg', client_msg_id: selfId.slice(2), text: 'three' },
+  ])
+  await applyEvents($, [{ seq: 4, type: 'chat_msg', client_msg_id: 'x', text: 'two again' }])
+  const ids = chatState().lines.map((l: any) => l.id)
+  expect(chatState().lines.map((l: any) => l.text)).toEqual(['mine', 'one', 'two', 'three'])
+  expect(new Set(ids).size).toBe(ids.length)
+  expect(selfId).toMatch(/^s-[0-9a-f-]{36}$/)
+})
+
+test('duplicate seq in one batch: applied once', X, async ($, on) => {
+  const { feed } = await matched($, on)
+  const m = { seq: 3, type: 'chat_msg', v: 1, client_msg_id: 'p1', text: 'hi' }
+  await feed([m, m])
+  expect((await texts(await pane($))).filter((x: string) => x === 'them  hi').length).toBe(1)
+})
+
+test('inbound caps: text 2000, pseudonym and blurb 80, opener 500; a blank peer line is skipped', X, async ($, on) => {
+  const { clock, feed } = await start($, on)
+  await turnStart($, clock)
+  await feed([{ ...MATCHED, pseudonym: 'n'.repeat(200), blurb: 'b'.repeat(200), opener: 'o'.repeat(900) }])
+  await feed([
+    { seq: 3, type: 'chat_msg', v: 1, client_msg_id: 'p1', text: 'x'.repeat(3000) },
+    { seq: 4, type: 'chat_msg', v: 1, client_msg_id: 'p2', text: ' \n\t ' },
+  ])
+  const t = await texts(await pane($, 1000))
+  expect(t).toContain("you're chatting with " + 'n'.repeat(80))
+  expect(t).toContain('b'.repeat(80))
+  expect(t).toContain('o'.repeat(500))
+  expect(t).toContain('them  ' + 'x'.repeat(2000))
+  expect(t.filter((x: string) => x.startsWith('them  ')).length).toBe(1)
+})
+
+test('peer ended while not placed: band back to searching, no ended line lingers', X, async ($, on) => {
+  const { feed } = await matched($, on, { open: () => ({ isPlaced: false, reason: 'narrow' }) })
+  await feed([{ seq: 3, type: 'session_ended', v: 1 }])
+  expect(await bandText($)).toMatch(/^. looking for someone$/)
+  expect(await texts(await pane($))).toEqual(['no chat going right now.'])
+})
+
+test('block / report settle before the leave goes out', X, async ($, on) => {
+  let release!: () => void
+  const held = new Promise<{ status: number }>((r) => (release = () => r({ status: 204 })))
+  const { log, clock } = await matched($, on, { send: (r) => (JSON.parse(r.body!).type === 'block' ? held : { status: 204 }) })
+  await runCommand($, 'block')
+  await clock.settle()
+  expect(sends(log).map((m) => m.type)).toEqual(['ready', 'block'])
+  release()
+  await clock.settle()
+  expect(sends(log).map((m) => m.type)).toEqual(['ready', 'block', 'leave'])
+})
+
+// The engine's test `$` cannot raise a person's close, so this drives the
+// module with a hand-made `$` (state in memory), as safety.test.tsx does.
+// Lets the background open (patch 2) land: a few microtask turns.
+const flush = async () => {
+  for (let i = 0; i < 50; i++) await Promise.resolve()
+}
+
+function fakeChat$() {
+  const state = new Map<string, { value: unknown; version: number }>()
+  const addr = (r: any) => `${r.plugin}.${r.key}`
+  const $ = {
+    state: {
+      get: async (r: any) => state.get(addr(r)) ?? { value: undefined, version: 0 },
+      set: async (r: any, value: unknown, o?: { ifVersion?: number }) => {
+        const cur = state.get(addr(r)) ?? { value: undefined, version: 0 }
+        if (o?.ifVersion !== undefined && o.ifVersion !== cur.version) return { isSet: false, version: cur.version }
+        state.set(addr(r), { value, version: cur.version + 1 })
+        return { isSet: true, version: cur.version + 1 }
+      },
+    },
+    // No timers here: the flourish must drop rather than stick (patch 7).
+    clock: {
+      every: () => {
+        throw new Error('no timers')
+      },
+      after: () => ({ cancel() {} }),
+    },
+    ui: { open: async () => ({ isPlaced: true }), close: async () => {}, invalidate: () => {} },
+  }
+  return { $: $ as any, chatState: () => state.get('claudingtin.chat')?.value as any }
+}
+
+test('person close: band offers the chat again; after an ended line it clears it; a plugin close changes nothing', async () => {
+  const { $, chatState } = fakeChat$()
+  await applyEvents($, [MATCHED as any])
+  await flush()
+  expect(chatState()).toMatchObject({ phase: 'chatting', placed: true })
+  // A timer that cannot start drops the flourish: the band is not stuck on it.
+  expect(await chatBand($)).toBe(null)
+  await onChatClose($, { kind: 'plugin' })
+  expect(chatState()).toMatchObject({ phase: 'chatting', placed: true })
+  await onChatClose($, { kind: 'person' })
+  expect(await chatBand($)).toBe('claudingtin · chatting with Ana — /claudingtin chat')
+
+  const b = fakeChat$()
+  await applyEvents(b.$, [MATCHED as any])
+  await flush()
+  await applyEvents(b.$, [{ seq: 3, type: 'session_ended' }])
+  expect(b.chatState()).toMatchObject({ ended: true, match: null })
+  await onChatClose(b.$, { kind: 'plugin' })
+  expect(b.chatState().ended).toBe(true)
+  await onChatClose(b.$, { kind: 'person' })
+  expect(b.chatState()).toMatchObject({ ended: false, placed: false })
+})
+
+test('stale poll: a matched that lands after turn.complete opens nothing, stays idle', X, async ($, on) => {
+  const { clock, feed, opens, log } = await start($, on)
+  await turnStart($, clock)
+  await turnEnd($, clock)
+  await feed([MATCHED])
+  expect(opens).toEqual([])
+  expect(await texts(await pane($))).toEqual(['no chat going right now.'])
+  expect(await bandText($)).toBe('claudingtin · connected')
+  // Not acked either: no further poll carries after=2.
+  expect(lines(log).some((l) => l === 'events ?after=2')).toBe(false)
+})

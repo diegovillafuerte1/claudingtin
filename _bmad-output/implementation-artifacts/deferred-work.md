@@ -311,3 +311,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-7-4-think-time-from-turn-events-and-no-surface-no-queue.md`
   summary: `loadAccountKey` (plugin/hooks/identity.ts) shares one in-flight load with no timeout, so a key-file read that never settles keeps every later load (and so every turn's eligibility) waiting for the rest of the session.
   evidence: 7.4 now abandons `eligible()` at 5 s so the worker is freed, but the shared `inFlight` promise in identity.ts is never released; fixing it means a timeout in identity.ts, outside 7.4's scope.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-7-5-mod-chat-surface.md`
+  summary: `inert()` (ported 1:1 from companion `inert.go`) drops U+200C ZWNJ and the tag characters U+E0020–E007F, breaking Persian/Indic text and subdivision flags, and deletes a lone `\r` (joining words) instead of mapping it to a newline.
+  evidence: Both `inert.go`'s `unicode.IsGraphic` check and the TS `\p{C}` filter classify those code points as Cf; 7.5 review (blind hunter) flagged it. Pre-existing companion behavior carried over for parity.

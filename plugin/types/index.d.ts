@@ -32,6 +32,30 @@ export type Link = {
   gen: number
 }
 
+/** Where the chat surface is: nothing, waiting in the queue, or in a match. */
+export type ChatPhase = 'idle' | 'searching' | 'chatting'
+
+/** The current match as `matched` named it. Peer-controlled text: render only through `inert`. */
+export type ChatMatch = { sessionId: string; pseudonym: string; blurb: string; opener: string }
+
+/** One line of the current chat: the peer's, or one this person sent (optimistic). */
+export type ChatLine = { id: string; from: 'peer' | 'self'; text: string }
+
+/**
+ * The chat surface (Story 7.5), in memory only: never written to disk.
+ * `lines` holds the current chat (at most 200); `ended` after the peer's
+ * session_ended (the Pane shows the calm line); `placed` whether the chat Pane
+ * is drawn; `left` after this person left, blocked or reported.
+ */
+export type Chat = {
+  phase: ChatPhase
+  match: ChatMatch | null
+  lines: ChatLine[]
+  ended: boolean
+  placed: boolean
+  left: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
     claudingtin: {
@@ -44,6 +68,8 @@ declare module 'claude-code' {
       link: Link
       /** True once the AbovePrompt band hook was asked to render this session. */
       drawn: boolean
+      /** The chat surface; in memory only, so it survives a hot reload but never a restart. */
+      chat: Chat
     }
   }
 }

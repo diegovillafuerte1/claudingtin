@@ -1,5 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
+import { CHAT_PANE_ID, COPY, INPUT_KEY, capText, chatBand, leaveChat, onChatClose, openChat, renderChat, resumeChat } from './chat'
 import { loadAccountKey } from './identity'
 import { markDrawn, onTurnEnd, onTurnStart, resume } from './link'
 import { onSafetyClose, openSafety, renderSafety, requireGate } from './safety'
@@ -21,7 +22,8 @@ export function normalizeBaseUrl(raw: unknown): string {
   return s === '' ? DEFAULT_BACKEND_URL : s
 }
 
-const USAGE = 'usage: /claudingtin safety  (read the safety note again)'
+const USAGE =
+  'usage: /claudingtin chat | leave | block | report | safety  (show the chat, end it, block or report them, or read the safety note again)'
 
 // On session start: the same check 7.4 makes (requireGate), which offers the
 // pane unless accepted or declined; accepted → warm the key file. Background
@@ -110,13 +112,14 @@ export const register: Register = (on, options) => {
     try {
       await $.command.register({
         name: 'claudingtin',
-        description: 'claudingtin: read the safety note again',
-        argumentHint: 'safety',
+        description: 'claudingtin: show the chat, leave, block or report, or read the safety note again',
+        argumentHint: 'chat|leave|block|report|safety',
       })
     } catch {
       // Fail open: no command this session.
     }
     void startGate($)
+    void resumeChat($).catch(() => {})
     void resume($, base).catch(() => {})
     return next(e)
   })
@@ -146,12 +149,46 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch((_$, e, next) => next(e)) // A failed decline never keeps the pane open.
 
+  on('ui.render', { component: 'Pane', requestId: CHAT_PANE_ID }, async ($, e, next) => {
+    try {
+      return await renderChat($, e, base)
+    } catch {
+      return next(e)
+    }
+  })
+
+  on('ui.close', { id: CHAT_PANE_ID }, async ($, e, next) => {
+    await onChatClose($, e.origin).catch(() => {})
+    return next(e)
+  }).catch((_$, e, next) => next(e))
+
+  // The outbound cap: every change and submit reaches the Input's handler at
+  // MAX_INPUT code points at most (InputProps has no maxLength).
+  on('ui.input', { plugin: 'claudingtin', element: INPUT_KEY }, async ($, e, next) => {
+    let capped: typeof e = e
+    try {
+      if (typeof e.value === 'string') capped = { ...e, value: capText(e.value) }
+    } catch {
+      capped = e // The typing as it came.
+    }
+    // One next either way, so the Input's handler never runs twice.
+    return next(capped)
+  })
+
   on('command.run', { command: 'claudingtin' }, async ($, e) => {
     try {
-      if (e.args.trim().toLowerCase() === 'safety') {
+      const verb = e.args.trim().toLowerCase()
+      if (verb === 'safety') {
         return (await openSafety($, true))
           ? { text: 'the safety note is up.' }
           : { text: "couldn't show the safety note here." }
+      }
+      if (verb === 'leave' || verb === 'block' || verb === 'report') {
+        return (await leaveChat($, base, verb)) ? {} : { text: COPY.noChat }
+      }
+      if (verb === 'chat') {
+        const r = await openChat($)
+        return r === 'open' ? {} : r === 'none' ? { text: COPY.noChat } : { text: "couldn't show the chat here." }
       }
     } catch {
       // Fall through to the usage line.
@@ -163,6 +200,20 @@ export const register: Register = (on, options) => {
     // Asked to draw: the mod's UI reaches this session (half of "no surface, no queue").
     markDrawn($)
     if (e.props.hasSurvey || e.props.maxRows < 1) return next(e)
+    let line: string | null = null
+    try {
+      line = await chatBand($)
+    } catch {
+      line = null
+    }
+    if (line !== null) {
+      const { Text } = $.ui.resolve(e)
+      return (
+        <Text key="claudingtin-band" dimColor wrap="truncate-end">
+          {line}
+        </Text>
+      )
+    }
     let v: boolean | null
     try {
       v = await read($, online)

@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
-import { parseSeqs } from './link'
+import { parseEvents } from './link'
 
 // Story 7.4: think-time from turn events, through the plugin's own hooks with
 // the world mocked beneath it (clock, env, fs, process, http, surfaces, UI).
@@ -531,9 +531,13 @@ test('band and gate stay green: the band still draws and /status still polls', X
   expect((await ui.find({ type: 'Text', text: /claudingtin/ }))?.text).toBe('claudingtin · connected')
 })
 
-test('parseSeqs: bare arrays only, numeric positive seqs', async () => {
-  expect(parseSeqs('[]')).toEqual([])
-  expect(parseSeqs('[{"seq":3},{"seq":2},{"type":"x"},{"seq":"4"},null]')).toEqual([3, 2])
-  expect(parseSeqs('{"seq":1}')).toBe(undefined)
-  expect(parseSeqs('nope')).toBe(undefined)
+test('parseEvents: bare arrays only, numeric positive seqs, raw fields kept', async () => {
+  expect(parseEvents('[]')).toEqual([])
+  expect(parseEvents('[{"seq":3,"type":"queued","v":1},{"seq":2},{"type":"x"},{"seq":"4"},null,[1]]')).toEqual([
+    { seq: 3, type: 'queued', v: 1 },
+    { seq: 2, type: '' },
+  ])
+  expect(parseEvents('[{"seq":1.5},{"seq":0},{"seq":-1}]')).toEqual([])
+  expect(parseEvents('{"seq":1}')).toBe(undefined)
+  expect(parseEvents('nope')).toBe(undefined)
 })
