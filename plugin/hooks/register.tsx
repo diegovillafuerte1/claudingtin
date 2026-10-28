@@ -1,6 +1,19 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import { CHAT_PANE_ID, COPY, INPUT_KEY, capText, chatBand, leaveChat, onChatClose, openChat, renderChat, resumeChat } from './chat'
+import {
+  CHAT_PANE_ID,
+  COPY,
+  INPUT_KEY,
+  capText,
+  chatBand,
+  getPersistSetting,
+  leaveChat,
+  onChatClose,
+  openChat,
+  renderChat,
+  resumeChat,
+  setPersistDefault,
+} from './chat'
 import { loadAccountKey } from './identity'
 import { markDrawn, onTurnEnd, onTurnStart, resume } from './link'
 import { onSafetyClose, openSafety, renderSafety, requireGate } from './safety'
@@ -23,7 +36,7 @@ export function normalizeBaseUrl(raw: unknown): string {
 }
 
 const USAGE =
-  'usage: /claudingtin chat | leave | block | report | safety  (show the chat, end it, block or report them, or read the safety note again)'
+  'usage: /claudingtin chat | leave | block | report | persist | safety  (show the chat, end it, block or report them, turn persist on or off, or read the safety note again)'
 
 // On session start: the same check 7.4 makes (requireGate), which offers the
 // pane unless accepted or declined; accepted → warm the key file. Background
@@ -38,6 +51,7 @@ async function startGate($: EngineInterface): Promise<void> {
 
 export const register: Register = (on, options) => {
   const base = normalizeBaseUrl(options.backendUrl)
+  setPersistDefault(options.persist)
 
   on('session.start', async ($, e, next) => {
     // Settles poll `gen` once: only while it is still the newest poll and in
@@ -112,8 +126,8 @@ export const register: Register = (on, options) => {
     try {
       await $.command.register({
         name: 'claudingtin',
-        description: 'claudingtin: show the chat, leave, block or report, or read the safety note again',
-        argumentHint: 'chat|leave|block|report|safety',
+        description: 'claudingtin: show the chat, leave, block or report, turn persist on or off, or read the safety note again',
+        argumentHint: 'chat|leave|block|report|persist|safety',
       })
     } catch {
       // Fail open: no command this session.
@@ -185,6 +199,18 @@ export const register: Register = (on, options) => {
       }
       if (verb === 'leave' || verb === 'block' || verb === 'report') {
         return (await leaveChat($, base, verb)) ? {} : { text: COPY.noChat }
+      }
+      if (verb === 'persist') {
+        // The userConfig field: setting it reloads the plugin, so the next chat snapshots the new value.
+        const next = !getPersistSetting()
+        try {
+          await $.config.set({ key: 'claudingtin.persist', value: next })
+        } catch {
+          return { text: COPY.persistFailed }
+        }
+        // Live at once (a second toggle reads it), whether or not the engine reloads.
+        setPersistDefault(next)
+        return { text: next ? COPY.persistOn : COPY.persistOff }
       }
       if (verb === 'chat') {
         const r = await openChat($)

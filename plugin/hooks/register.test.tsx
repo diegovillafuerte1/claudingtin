@@ -118,7 +118,8 @@ test('single trailing slash is stripped', { options: { backendUrl: 'http://h:1/'
 // The manifest test. No options means the manifest's userConfig defaults: the
 // first fetch proves plugin.json's backendUrl default equals the code's, and the
 // band drawing proves hooks.json loaded register.tsx (the kit loads the plugin
-// from its folder the way the engine does).
+// from its folder the way the engine does). The persist default (on) is pinned
+// by chat.test.tsx's "persist on by default" row, which sets no persist option.
 test('manifest: hooks.json loads the mod and the userConfig default matches the code', async ($, on) => {
   const { seen } = await start($, on, () => status(200))
   expect(seen[0]).toBe(`${DEFAULT_BACKEND_URL}/status`)

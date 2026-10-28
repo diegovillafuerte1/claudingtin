@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, RenderInput } from 'claude-code'
 import type { Chat, ChatLine, ChatMatch } from '../types'
-import { getLink, sendNow, sendSeqNow } from './link'
+import { getLink, releaseHold, sendNow, sendSeqNow } from './link'
 
 // The chat surface (Story 7.5): the events the /v1 poll hands over drive a
 // small state in $.state (memory only, never disk), and the band and a Pane
@@ -28,6 +28,11 @@ export const COPY = {
   block: 'block',
   report: 'report',
   noChat: 'no chat going right now.',
+  back: "your claude's back",
+  heldBand: "claudingtin · your claude's back — chat's still open",
+  persistOn: "persist is on — your next chat stays open when your claude's back",
+  persistOff: "persist is off — chats end when your claude's back",
+  persistFailed: "couldn't change persist here.",
 } as const
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const
@@ -35,9 +40,23 @@ export const FLOURISH = ['◐', '◓', '◑', '◒', '◐', '◓'] as const
 const SPIN_MS = 100
 const FLOURISH_MS = 90
 
-const IDLE: Chat = { phase: 'idle', match: null, lines: [], ended: false, placed: false, left: false }
+const IDLE: Chat = { phase: 'idle', match: null, lines: [], ended: false, placed: false, left: false, persist: false, back: false }
 
 export const chat = atom({ plugin: 'claudingtin', key: 'chat' } as const, IDLE)
+
+// The persist setting (Story 3.6), from userConfig. A module variable: a
+// change to the options reloads the plugin and register sets it again. Each
+// chat snapshots it at `matched`, so a toggle changes only the next chat.
+let persistSetting = true
+
+/** register(on, options): the userConfig `persist`; anything but a boolean reads as on. */
+export function setPersistDefault(v: unknown): void {
+  persistSetting = typeof v === 'boolean' ? v : true
+}
+
+export function getPersistSetting(): boolean {
+  return persistSetting
+}
 
 // ---------------------------------------------------------------------------
 // Text safety: a port of companion/internal/chatui/inert.go (deleted in Story
@@ -164,19 +183,23 @@ export type ChatEvent = { seq: number; type: string; [k: string]: unknown }
 
 const str = (v: unknown) => (typeof v === 'string' ? v : '')
 
-/** Applies fresh events in ascending seq order. Never throws. */
-export async function applyEvents($: EngineInterface, events: readonly ChatEvent[]): Promise<void> {
+/**
+ * Applies fresh events in ascending seq order. Never throws. After a held
+ * chat's session_ended the rest of the batch is dropped: Claude is back, so a
+ * re-enqueue the hub raced in (queued, matched) is never shown.
+ */
+export async function applyEvents($: EngineInterface, events: readonly ChatEvent[], base?: string): Promise<void> {
   const sorted = [...events].sort((a, b) => a.seq - b.seq)
   for (const ev of sorted) {
     try {
-      await applyEvent($, ev)
+      if ((await applyEvent($, ev, base)) === 'stop') return
     } catch {
       // Quiet: the next event still applies.
     }
   }
 }
 
-async function applyEvent($: EngineInterface, ev: ChatEvent): Promise<void> {
+async function applyEvent($: EngineInterface, ev: ChatEvent, base: string | undefined): Promise<'stop' | void> {
   switch (ev.type) {
     case 'queued':
       await setChat($, (c) => (c.phase === 'chatting' ? c : { ...c, phase: 'searching' }))
@@ -189,7 +212,8 @@ async function applyEvent($: EngineInterface, ev: ChatEvent): Promise<void> {
         opener: capText(ev.opener, MAX_OPENER),
       }
       flourish = 0
-      await setChat($, () => ({ phase: 'chatting', match, lines: [], ended: false, placed: false, left: false }))
+      const persist = persistSetting
+      await setChat($, () => ({ phase: 'chatting', match, lines: [], ended: false, placed: false, left: false, persist, back: false }))
       // Not awaited: an open that never settles must not stall the poll loop.
       void openForMatch($, match.sessionId)
       return
@@ -213,8 +237,13 @@ async function applyEvent($: EngineInterface, ev: ChatEvent): Promise<void> {
         c.phase !== 'chatting'
           ? c
           : // Unplaced (narrow), the ended line would never be seen: nothing lingers.
-            { ...c, phase: searching ? 'searching' : 'idle', match: null, lines: [], ended: c.placed, left: false },
+            { ...c, phase: searching ? 'searching' : 'idle', match: null, lines: [], ended: c.placed, left: false, back: false },
       )
+      const held = (await getLink($)).held
+      if (held) {
+        await releaseHold($, base)
+        return 'stop'
+      }
       return
     }
     default:
@@ -273,7 +302,7 @@ export async function leaveChat($: EngineInterface, base: string, kind: LeaveKin
     await setChat($, (c) => {
       left = c.phase === 'chatting' && !c.left
       return left
-        ? { phase: searching ? 'searching' : 'idle', match: null, lines: [], ended: false, placed: false, left: true }
+        ? { ...IDLE, phase: searching ? 'searching' : 'idle', left: true }
         : c
     })
     if (!left) return false
@@ -282,7 +311,10 @@ export async function leaveChat($: EngineInterface, base: string, kind: LeaveKin
     if (kind === 'block') bodies.push({ type: 'block', v: 1 })
     if (kind === 'report') bodies.push({ type: 'report', v: 1, last_n: REPORT_LAST_N })
     bodies.push({ type: 'leave', v: 1 })
-    void sendSeqNow($, base, bodies).catch(() => {})
+    // A held chat's withheld busy follows once these settle (Claude is back).
+    void sendSeqNow($, base, bodies)
+      .then(() => releaseHold($, base))
+      .catch(() => {})
     closePane($)
     return true
   } catch {
@@ -300,6 +332,37 @@ export async function resetChat($: EngineInterface): Promise<void> {
       return had ? { ...IDLE } : c
     })
     if (had) closePane($)
+  } catch {
+    // Quiet.
+  }
+}
+
+export type ReturnMode = 'hold' | 'leave' | 'none'
+
+/**
+ * The person's Claude is back (a main-loop turn.complete): a live chat that
+ * was matched with persist on is held open with the quiet note ('hold'), when
+ * the link can keep polling; otherwise it ends ('leave'); no chat is 'none'.
+ * Never throws.
+ */
+export async function onModelBack($: EngineInterface, canHold: boolean): Promise<ReturnMode> {
+  try {
+    let mode: ReturnMode = 'none'
+    await setChat($, (c) => {
+      if (c.phase !== 'chatting' || c.left || c.match === null) return c
+      mode = c.persist && canHold ? 'hold' : 'leave'
+      return mode === 'hold' ? { ...c, back: true } : c
+    })
+    return mode
+  } catch {
+    return 'none'
+  }
+}
+
+/** A new burst began: the "your claude's back" note goes. Never throws. */
+export async function clearBack($: EngineInterface): Promise<void> {
+  try {
+    await setChat($, (c) => (c.back ? { ...c, back: false } : c))
   } catch {
     // Quiet.
   }
@@ -353,6 +416,7 @@ export function bandLine(c: Chat): string | null {
   if (flourish !== null && c.phase === 'chatting') return `${FLOURISH[flourish] ?? FLOURISH[0]}${COPY.flourish}`
   if (c.phase === 'searching') return `${SPINNER[frame % SPINNER.length]} ${COPY.searching}`
   if (c.phase === 'chatting' && !c.placed) return `claudingtin · chatting with ${peerName(c.match)} — /claudingtin chat`
+  if (c.phase === 'chatting' && c.back) return COPY.heldBand
   return null
 }
 
@@ -393,7 +457,7 @@ export async function renderChat($: EngineInterface, e: RenderInput<'Pane'>, bas
   const rowsProp = e.props.scroll?.bodyRows
   const bodyRows = typeof rowsProp === 'number' && Number.isFinite(rowsProp) ? rowsProp : 14
   // Header and buttons, the blurb when there is one, the Input where the surface has one.
-  const fixed = 2 + (blurb !== '' ? 1 : 0) + (Input !== null ? 1 : 0)
+  const fixed = 2 + (blurb !== '' ? 1 : 0) + (c.back ? 1 : 0) + (Input !== null ? 1 : 0)
   let room = Math.max(1, bodyRows - fixed)
   let first = entries.length
   while (first > 0) {
@@ -413,6 +477,11 @@ export async function renderChat($: EngineInterface, e: RenderInput<'Pane'>, bas
       {blurb !== '' ? (
         <Text key="blurb" dimColor wrap="truncate-end">
           {blurb}
+        </Text>
+      ) : null}
+      {c.back ? (
+        <Text key="back" dimColor wrap="truncate-end">
+          {COPY.back}
         </Text>
       ) : null}
       <Box key="actions" flexDirection="row" gap={2}>

@@ -20,7 +20,9 @@ export type Presence = 'ready' | 'busy'
  * `sent` what the backend was last told; `quiet` after a supersede (an events
  * poll's 410) or a second 410 on send ready, until the next main-loop
  * turn.start; `outdated` after please_update (this session);
- * `gen` names the newest events poll loop. Never holds the account key.
+ * `gen` names the newest events poll loop; `held` while a persisted chat stays
+ * open past the burst (busy is withheld and the events poll keeps running).
+ * Never holds the account key.
  */
 export type Link = {
   handle: string | null
@@ -30,6 +32,7 @@ export type Link = {
   quiet: boolean
   outdated: boolean
   gen: number
+  held: boolean
 }
 
 /** Where the chat surface is: nothing, waiting in the queue, or in a match. */
@@ -54,6 +57,10 @@ export type Chat = {
   ended: boolean
   placed: boolean
   left: boolean
+  /** The persist setting as it was at `matched` (Story 3.6): a toggle changes only the next chat. */
+  persist: boolean
+  /** Held past the burst: the person's Claude is back and the chat stays open. */
+  back: boolean
 }
 
 declare module 'claude-code' {
