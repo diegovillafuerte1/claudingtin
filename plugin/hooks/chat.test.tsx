@@ -186,6 +186,7 @@ async function matched($: any, on: any, w: World = {}) {
 }
 
 const X = { options: { backendUrl: BASE } }
+const OFF = { options: { backendUrl: BASE, persist: false } }
 
 // ---------------------------------------------------------------------------
 // Text safety.
@@ -404,12 +405,12 @@ for (const [kind, via] of [
   })
 }
 
-test('own Claude back: chat reset, Pane closed, busy sent', X, async ($, on) => {
+test('own Claude back, persist off: leave then busy, chat reset, Pane closed', OFF, async ($, on) => {
   const { clock, log, closes } = await matched($, on)
   await turnEnd($, clock)
   expect(closes).toContainEqual({ id: 'claudingtin-chat', origin: 'plugin' })
-  expect(lines(log).at(-1)).toBe('send busy')
-  expect(sends(log).some((m) => m.type === 'leave')).toBe(false)
+  expect(lines(log).slice(-2)).toEqual(['send leave', 'send busy'])
+  expect(sends(log).filter((m) => m.type === 'busy').length).toBe(1)
   expect(await texts(await pane($))).toEqual(['no chat going right now.'])
   expect(await bandText($)).toBe('claudingtin · connected')
 })
@@ -676,4 +677,165 @@ test('stale poll: a matched that lands after turn.complete opens nothing, stays 
   expect(await bandText($)).toBe('claudingtin · connected')
   // Not acked either: no further poll carries after=2.
   expect(lines(log).some((l) => l === 'events ?after=2')).toBe(false)
+})
+
+// ---------------------------------------------------------------------------
+// Story 3.6: persist.
+
+const busies = (log: Req[]) => sends(log).filter((m) => m.type === 'busy').length
+const leaves = (log: Req[]) => sends(log).filter((m) => m.type === 'leave').length
+const COPY_ENDED = "looks like their claude's back — catch you later"
+const BACK = "your claude's back"
+const HELD_BAND = "claudingtin · your claude's back — chat's still open"
+
+// Matched with persist on (the default: X sets no persist), then the person's Claude came back.
+async function held($: any, on: any, w: World = {}) {
+  const s = await matched($, on, w)
+  await turnEnd($, s.clock)
+  return s
+}
+
+test('persist on by default: Claude back holds the chat open with the quiet note, nothing sent', X, async ($, on) => {
+  const { log, closes } = await held($, on)
+  expect(closes).toEqual([])
+  expect(busies(log)).toBe(0)
+  expect(leaves(log)).toBe(0)
+  expect(await texts(await pane($))).toContain(BACK)
+  expect(await bandText($)).toBe(HELD_BAND)
+})
+
+test('held: the events poll keeps running, so peer lines still land', X, async ($, on) => {
+  const { feed } = await held($, on)
+  await feed([{ seq: 3, type: 'chat_msg', v: 1, client_msg_id: 'p', text: 'still here?' }])
+  expect(await texts(await pane($))).toContain('them  still here?')
+})
+
+test('held, peer ends: ended line, one busy, and a raced rematch in the batch is ignored', X, async ($, on) => {
+  const { feed, log, opens } = await held($, on)
+  const opened = opens.length
+  await feed([
+    { seq: 3, type: 'session_ended', v: 1 },
+    { seq: 4, type: 'queued', v: 1 },
+    { ...MATCHED, seq: 5, session_id: 's-2' },
+  ])
+  expect(await texts(await pane($))).toEqual([COPY_ENDED])
+  expect(busies(log)).toBe(1)
+  expect(opens.length).toBe(opened)
+  expect(await bandText($)).toBe('claudingtin · connected')
+})
+
+test('held, own leave: exactly one leave, then the withheld busy, Pane closed', X, async ($, on) => {
+  const { clock, log, closes } = await held($, on)
+  await runCommand($, 'leave')
+  await clock.settle()
+  expect(lines(log).filter((l) => l.startsWith('send')).slice(-2)).toEqual(['send leave', 'send busy'])
+  expect(leaves(log)).toBe(1)
+  expect(busies(log)).toBe(1)
+  expect(closes).toContainEqual({ id: 'claudingtin-chat', origin: 'plugin' })
+})
+
+for (const verb of ['block', 'report'] as const) {
+  test(`held, ${verb}: ${verb}, leave, then busy, in that order`, X, async ($, on) => {
+    const { clock, log } = await held($, on)
+    await runCommand($, verb)
+    await clock.settle()
+    expect(lines(log).filter((l) => l.startsWith('send')).slice(-3)).toEqual([`send ${verb}`, 'send leave', 'send busy'])
+  })
+}
+
+test('held, handle lost (events 410): hold dropped, chat reset, nothing more sent', X, async ($, on) => {
+  const { failPoll, log, closes } = await held($, on)
+  const before = sends(log).length
+  await failPoll({ status: 410 })
+  expect(closes).toContainEqual({ id: 'claudingtin-chat', origin: 'plugin' })
+  expect(await texts(await pane($))).toEqual(['no chat going right now.'])
+  expect(sends(log).length).toBe(before)
+})
+
+test('held, new burst: the note goes, the chat carries on, nothing sent', X, async ($, on) => {
+  const { clock, log } = await held($, on)
+  const before = sends(log).length
+  await turnStart($, clock)
+  expect(await texts(await pane($))).not.toContain(BACK)
+  expect(sends(log).length).toBe(before)
+  // And the next return holds it again.
+  await turnEnd($, clock)
+  expect(await texts(await pane($))).toContain(BACK)
+  expect(busies(log)).toBe(0)
+})
+
+test('a toggle mid-chat changes only the next chat', X, async ($, on) => {
+  on('config.set', (_$: any, e: any) => ({ value: e.value }))
+  const { clock, log, feed } = await matched($, on)
+  expect((await runCommand($, 'persist')).text).toBe("persist is off — chats end when your claude's back")
+  await clock.settle()
+  // This chat was matched with persist on: it is held.
+  await turnEnd($, clock)
+  expect(leaves(log)).toBe(0)
+  expect(await texts(await pane($))).toContain(BACK)
+  // Peer ends it; the next chat snapshots persist off.
+  await feed([{ seq: 3, type: 'session_ended', v: 1 }])
+  await turnStart($, clock)
+  await feed([{ ...MATCHED, seq: 4, session_id: 's-2' }])
+  await clock.advance(600)
+  await turnEnd($, clock)
+  expect(lines(log).slice(-2)).toEqual(['send leave', 'send busy'])
+})
+
+test('/claudingtin persist twice flips it back on', OFF, async ($, on) => {
+  const sets: any[] = []
+  on('config.set', (_$: any, e: any) => {
+    sets.push(e.value)
+    return { value: e.value }
+  })
+  await start($, on)
+  expect((await runCommand($, 'persist')).text).toBe("persist is on — your next chat stays open when your claude's back")
+  expect((await runCommand($, 'persist')).text).toBe("persist is off — chats end when your claude's back")
+  expect(sets).toEqual([true, false])
+})
+
+test('hung backend: Claude back resolves without waiting on a fetch (persist off)', OFF, async ($, on) => {
+  // Only the leave and busy hang: ready went out fine.
+  const { clock } = await matched($, on, { send: (r) => (/"(leave|busy)"/.test(r.body ?? '') ? never() : { status: 204 }) })
+  let done = false
+  void $.turn.complete({ answer: '', durationMs: 1, turnId: lastTurn, isAborted: false, reason: 'answer' }).then(() => (done = true))
+  await clock.settle()
+  expect(done).toBe(true)
+})
+
+test('hung backend: Claude back resolves without waiting on a fetch (persist on)', X, async ($, on) => {
+  const { clock } = await matched($, on, { send: (r) => (/"(leave|busy)"/.test(r.body ?? '') ? never() : { status: 204 }) })
+  let done = false
+  void $.turn.complete({ answer: '', durationMs: 1, turnId: lastTurn, isAborted: false, reason: 'answer' }).then(() => (done = true))
+  await clock.settle()
+  expect(done).toBe(true)
+})
+
+test('hot reload while held: note and polling resume', X, async ($, on) => {
+  const { clock, feed } = await held($, on)
+  await $.session.start({ cwd: '/tmp', source: 'resume' })
+  await clock.settle()
+  expect(await texts(await pane($))).toContain(BACK)
+  await feed([]) // the pre-reload poll: its loop has given way to the new one
+  await feed([{ seq: 3, type: 'chat_msg', v: 1, client_msg_id: 'p', text: 'after reload' }])
+  expect(await texts(await pane($))).toContain('them  after reload')
+})
+
+test('/claudingtin persist flips the userConfig field and says what the next chat does', X, async ($, on) => {
+  const sets: any[] = []
+  on('config.set', (_$: any, e: any) => {
+    sets.push({ key: e.key, value: e.value })
+    return { value: e.value }
+  })
+  await start($, on)
+  expect((await runCommand($, 'persist')).text).toBe("persist is off — chats end when your claude's back")
+  expect(sets).toEqual([{ key: 'claudingtin.persist', value: false }])
+})
+
+test('/claudingtin persist when the setting cannot change: a calm line', OFF, async ($, on) => {
+  on('config.set', () => {
+    throw new Error('locked')
+  })
+  await start($, on)
+  expect((await runCommand($, 'persist')).text).toBe("couldn't change persist here.")
 })

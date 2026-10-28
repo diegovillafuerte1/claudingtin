@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginState } from 'claude-code'
 import type { Presence } from '../types'
-import { applyEvents, resetChat } from './chat'
+import { applyEvents, clearBack, onModelBack, resetChat } from './chat'
 import type { ChatEvent } from './chat'
 import { loadAccountKey } from './identity'
 import { requireGate } from './safety'
@@ -26,7 +26,7 @@ const EMPTY_PACE_MS = 500
 
 type Link = PluginState['claudingtin']['link']
 
-const INITIAL: Link = { handle: null, after: 0, want: null, sent: null, quiet: false, outdated: false, gen: 0 }
+const INITIAL: Link = { handle: null, after: 0, want: null, sent: null, quiet: false, outdated: false, gen: 0, held: false }
 
 export const link = atom({ plugin: 'claudingtin', key: 'link' } as const, INITIAL)
 /** Set once the AbovePrompt band hook is asked to render: the mod's UI draws here. */
@@ -62,26 +62,75 @@ export async function getLink($: EngineInterface): Promise<Link> {
 // Entry points: each sets `want` (state only, awaited so turn order holds),
 // then starts the worker without waiting on it. Never throw.
 
-/** A main-loop turn started: ask for the queue, and lift a supersede's quiet. */
+/**
+ * A main-loop turn started: ask for the queue, and lift a supersede's quiet.
+ * A held chat simply carries on in the new burst.
+ */
 export async function onTurnStart($: EngineInterface, base: string): Promise<void> {
   try {
-    await setLink($, (l) => ({ ...l, want: 'ready', quiet: false }))
+    await setLink($, (l) => ({ ...l, want: 'ready', quiet: false, held: false }))
   } catch {
+    return
+  }
+  await clearBack($)
+  void work($, base)
+}
+
+/**
+ * A main-loop turn completed (any reason): leave the queue. A chat that was
+ * matched with persist on is held open (busy withheld, polling kept, so the
+ * hub never tears the pair down); with persist off it ends with leave, then
+ * busy, in that order (Story 3.6).
+ */
+export async function onTurnEnd($: EngineInterface, base: string): Promise<void> {
+  // A hold needs a live events poll to keep the lease (and the chat) alive.
+  let canHold = false
+  try {
+    canHold = polling(await getLink($))
+  } catch {
+    canHold = false
+  }
+  const mode = await onModelBack($, canHold)
+  if (mode === 'hold') {
+    try {
+      await setLink($, (l) => ({ ...l, want: 'busy', held: true }))
+    } catch {
+      await clearBack($)
+    }
+    return // nothing to send: the hold keeps the backend as it is
+  }
+  try {
+    await setLink($, (l) => ({ ...l, want: 'busy', held: false }))
+  } catch {
+    return
+  }
+  // Own Claude is back: the chat ends here.
+  await resetChat($)
+  if (mode === 'leave') {
+    // persist off: the leave settles first, then the worker sends busy.
+    void sendSeqNow($, base, [{ type: 'leave', v: 1 }]).then(() => work($, base))
     return
   }
   void work($, base)
 }
 
-/** A main-loop turn completed (any reason): leave the queue. */
-export async function onTurnEnd($: EngineInterface, base: string): Promise<void> {
+/**
+ * A held chat ended (the peer's session_ended, the person's leave): the hold
+ * is lifted and, if Claude is still back, the worker sends the withheld busy.
+ * Without a base (a direct call) only the hold is lifted. Never throws.
+ */
+export async function releaseHold($: EngineInterface, base: string | undefined): Promise<void> {
+  // A leave's sends go first and call this once they settle, so busy is last on the wire.
   try {
-    await setLink($, (l) => ({ ...l, want: 'busy' }))
+    let was = false
+    await setLink($, (l) => {
+      was = l.held
+      return l.held ? { ...l, held: false } : l
+    })
+    if (was && base !== undefined) void work($, base)
   } catch {
-    return
+    // Quiet.
   }
-  // Own Claude is back: the chat ends here (busy tells the peer).
-  await resetChat($)
-  void work($, base)
 }
 
 /**
@@ -165,6 +214,8 @@ async function reconcile($: EngineInterface, base: string, gen: number): Promise
     if (l.want === null || l.want === l.sent) return
 
     if (l.want === 'busy') {
+      // A held chat outlives the burst: busy would end the pair, so it waits.
+      if (l.held) return
       if (l.handle === null) {
         // Nothing can be queued without a handle (a fast first burst): nothing to say.
         await setLink($, (s) => (s.want === 'busy' && s.handle === null ? { ...s, sent: 'busy' } : s))
@@ -235,12 +286,14 @@ async function reconcile($: EngineInterface, base: string, gen: number): Promise
 // ---------------------------------------------------------------------------
 // The events poll: one loop per `gen` and handle, at most one fetch in flight
 // on a live handle (a dropped handle's poll is abandoned to its fate). It runs
-// only while the burst lasts (want and sent both ready, on a handle).
+// only while the burst lasts (want and sent both ready, on a handle), or while
+// a persisted chat is held past it.
 
 let pollingKey: string | null = null
 const pollKey = (l: Link) => `${l.gen}:${l.handle}`
 
-const polling = (l: Link) => l.handle !== null && l.want === 'ready' && l.sent === 'ready' && !l.quiet && !l.outdated
+const polling = (l: Link) =>
+  l.handle !== null && (l.want === 'ready' || l.held) && l.sent === 'ready' && !l.quiet && !l.outdated
 
 export async function ensurePoll($: EngineInterface, base: string): Promise<void> {
   let gen: number
@@ -283,7 +336,7 @@ async function pollLoop($: EngineInterface, base: string, gen: number, handle: s
 
     if (res?.status === 410) {
       // Superseded (another session took the key): quiet until the next turn.start.
-      await setLink($, (s) => (s.handle === handle ? { ...s, handle: null, after: 0, sent: null, quiet: true } : s))
+      await setLink($, (s) => (s.handle === handle ? { ...s, handle: null, after: 0, sent: null, quiet: true, held: false } : s))
       await resetChat($)
       return
     }
@@ -307,7 +360,7 @@ async function pollLoop($: EngineInterface, base: string, gen: number, handle: s
       .filter((ev) => ev.seq > now.after && !seen.has(ev.seq) && (seen.add(ev.seq), true))
       .sort((a, b) => a.seq - b.seq)
     if (fresh.length > 0) {
-      await applyEvents($, fresh)
+      await applyEvents($, fresh, base)
       const max = fresh[fresh.length - 1]!.seq
       await setLink($, (s) => (s.handle === handle && s.gen === gen && max > s.after ? { ...s, after: max } : s))
     } else {
