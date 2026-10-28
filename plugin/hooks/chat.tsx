@@ -40,7 +40,8 @@ const IDLE: Chat = { phase: 'idle', match: null, lines: [], ended: false, placed
 export const chat = atom({ plugin: 'claudingtin', key: 'chat' } as const, IDLE)
 
 // ---------------------------------------------------------------------------
-// Text safety: a port of companion/internal/chatui/inert.go.
+// Text safety: a port of companion/internal/chatui/inert.go (deleted in Story
+// 7.6; see commit 9398045).
 
 const UNSAFE = /^[\p{C}\p{Zl}\p{Zp}]$/u
 

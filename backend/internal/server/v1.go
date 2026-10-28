@@ -24,8 +24,7 @@ import (
 //   - GET  /v1/events?after=N long-polls the handle's one ordered event queue
 //     (AD-19): every server→client message for the handle, each stamped with a
 //     monotonic seq. after=N acknowledges, so events with seq ≤ N are dropped.
-//   - POST /v1/send carries one client→server message to the hub, as a /ws frame
-//     would.
+//   - POST /v1/send carries one client→server message to the hub.
 //
 // Each live handle owns exactly one hub.Session at a time. A pump goroutine
 // drains that session's Outbound into the event queue. A lease (AD-17) keeps the
@@ -48,7 +47,7 @@ const handleHeader = "X-Claudingtin-Handle"
 // maxV1Body caps every /v1 request body. Per-message content caps are Epic 4's.
 const maxV1Body = 64 << 10
 
-// v1Outbound is the hub.Session Outbound buffer, sized like the /ws one. The
+// v1Outbound is the hub.Session Outbound buffer. The
 // pump drains it continuously into the event queue, so a full event queue — not
 // this channel — is where overflow is detected.
 const v1Outbound = 32
@@ -195,8 +194,8 @@ func (a *v1API) runPump(h *handle, p *pump) {
 			a.push(h, m)
 		case <-p.sess.Evict:
 			// The hub took this session over. On the handle's current pump that
-			// is someone else's hello for the key (a /ws one, or a /v1 hello
-			// that has already closed the handle). On an older pump it is this
+			// is another /v1 hello for the key, which has already closed the
+			// handle, so this arm is defensive. On an older pump it is this
 			// handle's own re-register displacing a stale session, which is not
 			// a reason to close the handle.
 			finishPred()
@@ -254,7 +253,7 @@ func (a *v1API) push(h *handle, m any) {
 }
 
 // appendEnd appends session_ended unless the previous event already is one.
-// This is the /v1 counterpart of /ws's sentEnd latch. It also gives an idle
+// It is the per-handle sentEnd latch. It also gives an idle
 // handle that is taken over a terminal session_ended before its 410.
 func (a *v1API) appendEnd(h *handle) {
 	h.sessionID = ""
@@ -422,7 +421,7 @@ func (a *v1API) handleHello(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pv := hello.ProtocolVersion
-	// Same version gate as /ws (AD-5): current, previous, or newer is served.
+	// The version gate (AD-5): current, previous, or newer is served.
 	if pv < proto.PROTOCOL_VERSION-1 {
 		writeV1(w, http.StatusOK, proto.PleaseUpdate{})
 		a.logger.Info("v1 please_update", "remote", remote, "pv", pv)
@@ -555,7 +554,7 @@ func ack(h *handle, after int64) {
 }
 
 // handleSend answers POST /v1/send: one client→server message, routed to the
-// hub exactly as a post-hello /ws frame is.
+// hub.
 func (a *v1API) handleSend(w http.ResponseWriter, r *http.Request) {
 	msg, err := readV1Msg(w, r)
 
@@ -606,7 +605,7 @@ func (a *v1API) handleSend(w http.ResponseWriter, r *http.Request) {
 		// No log line: even a content-free one would leak chat volume and timing.
 		a.hub.Relay(h.sess, m)
 	}
-	// Every other client message is accepted and ignored, as on /ws.
+	// Every other client message is accepted and ignored.
 	a.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }

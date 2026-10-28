@@ -30,7 +30,7 @@ func testV1Config() v1Config {
 func newV1Harness(t *testing.T, cfg v1Config) *harness {
 	t.Helper()
 	h, logs := runHub(t)
-	srv := &server{hub: h, logger: loggerTo(logs), helloDeadline: defaultHelloDeadline}
+	srv := &server{hub: h, logger: loggerTo(logs)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", srv.handleStatus)
 	newV1API(h, srv.logger, cfg).register(mux)
@@ -291,6 +291,20 @@ func TestV1HelloTooOldGetsPleaseUpdateAndNoHandle(t *testing.T) {
 	}
 }
 
+func TestV1HelloEdgeVersionsWelcomed(t *testing.T) {
+	h := newV1Harness(t, testV1Config())
+	for i, pv := range []int{proto.PROTOCOL_VERSION - 1, proto.PROTOCOL_VERSION + 5} {
+		code, b := do(t, http.MethodPost, h.ts.URL+"/v1/hello", "",
+			encode(t, proto.Hello{AccountKey: fmt.Sprintf("acct-edge-%d", i), ProtocolVersion: pv}))
+		if code != http.StatusOK {
+			t.Fatalf("pv %d: status %d, want 200", pv, code)
+		}
+		if w, ok := decodeBody(t, b).(proto.Welcome); !ok || w.Handle == "" {
+			t.Fatalf("pv %d: body %s, want welcome with a handle", pv, b)
+		}
+	}
+}
+
 func TestV1BadHelloIs400WithError(t *testing.T) {
 	h := newV1Harness(t, testV1Config())
 	cases := []struct {
@@ -504,11 +518,51 @@ func TestV1OverflowEndsSessionNotSilentDrop(t *testing.T) {
 
 // --- send -------------------------------------------------------------------
 
+func TestV1ChatRelayKeepsOrderAndMultiByteText(t *testing.T) {
+	h := newV1Harness(t, testV1Config())
+	a, b, _ := matchPair(t, h, "acct-a", "acct-b")
+	want := []string{"first", "héllo — 你好 👋🏽", "third\nline"}
+	for i, text := range want {
+		a.mustSend(proto.ChatMsg{ClientMsgID: fmt.Sprintf("c%d", i), Text: text})
+	}
+	got := b.chatTexts(len(want))
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// The peer's session_ended is the same bare frame whatever ended the pairing.
+func TestV1PeerSessionEndedBytesIdenticalAcrossCauses(t *testing.T) {
+	canonical := string(encode(t, proto.SessionEnded{}))
+	causes := map[string]func(t *testing.T, h *harness, a *v1Client, key string){
+		"busy":      func(t *testing.T, h *harness, a *v1Client, key string) { a.mustSend(proto.Busy{}) },
+		"leave":     func(t *testing.T, h *harness, a *v1Client, key string) { a.mustSend(proto.Leave{}) },
+		"supersede": func(t *testing.T, h *harness, a *v1Client, key string) { v1Hello(t, h, key, "") },
+	}
+	for name, end := range causes {
+		t.Run(name, func(t *testing.T) {
+			h := newV1Harness(t, testV1Config())
+			a, b, _ := matchPair(t, h, "acct-a-"+name, "acct-b-"+name)
+			end(t, h, a, "acct-a-"+name)
+			evs := b.until(proto.TypeSessionEnded)
+			var m map[string]any
+			if err := json.Unmarshal(evs[len(evs)-1].raw, &m); err != nil {
+				t.Fatal(err)
+			}
+			delete(m, "seq")
+			got, _ := json.Marshal(m)
+			if string(got) != canonical {
+				t.Fatalf("session_ended = %s, want %s", got, canonical)
+			}
+		})
+	}
+}
+
 func TestV1SendRoutesAndValidates(t *testing.T) {
 	h := newV1Harness(t, testV1Config())
 	a := v1Hello(t, h, "acct-a", "")
 
-	// Client messages with no hub meaning yet are accepted and ignored, as on /ws.
+	// Client messages with no hub meaning yet are accepted and ignored.
 	for _, m := range []any{proto.Block{}, proto.Report{LastN: 3}, proto.ProfilePut{}, proto.ForgetMe{},
 		proto.NotePut{}, proto.Hello{AccountKey: "acct-a", ProtocolVersion: 1}, proto.Leave{}, proto.Busy{},
 		proto.ChatMsg{ClientMsgID: "u", Text: "unpaired"}} {
@@ -795,30 +849,16 @@ func TestV1LogsCarryNoHandleKeyOrText(t *testing.T) {
 
 // --- review follow-ups ------------------------------------------------------------
 
-// TestV1RoutesServedByNewAndWSTakeoverRetiresHandle drives the real constructor
-// (so the production /v1 wiring and default config are exercised), then has a
-// /ws hello take the same key over from a live /v1 handle.
-func TestV1RoutesServedByNewAndWSTakeoverRetiresHandle(t *testing.T) {
+// TestV1RoutesServedByNew drives the real constructor, so the production /v1
+// wiring and default config are exercised end to end.
+func TestV1RoutesServedByNew(t *testing.T) {
 	h := newHarness(t)
 	if code, _ := do(t, http.MethodGet, h.ts.URL+"/v1/hello", "", nil); code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /v1/hello via New: status %d, want 405", code)
 	}
-	a := v1Hello(t, h, "acct-mixed", "")
+	a := v1Hello(t, h, "acct-new", "")
 	a.mustSend(proto.Ready{})
 	a.until(proto.TypeQueued)
-
-	c := h.dial(t)
-	writeMsg(t, c, helloFor("acct-mixed", proto.PROTOCOL_VERSION))
-
-	if evs := a.until(proto.TypeSessionEnded); evs[len(evs)-1].Type != proto.TypeSessionEnded {
-		t.Fatalf("got %v", types(evs))
-	}
-	if code, _ := a.pollRaw(); code != http.StatusGone {
-		t.Fatalf("taken-over handle: status %d, want 410", code)
-	}
-	if !strings.Contains(h.logs.String(), "v1 taken over") {
-		t.Error(`logs missing "v1 taken over"`)
-	}
 }
 
 func TestV1EventsAfterBeyondLastSeqIs400(t *testing.T) {

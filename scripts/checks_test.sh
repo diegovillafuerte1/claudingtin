@@ -85,15 +85,15 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 4. default output = exactly the four ./<dir>/... globs, in go.work order
+# 4. default output = exactly the two ./<dir>/... globs, in go.work order
 # --------------------------------------------------------------------------
 rc=0
 out="$(bash "$wm" 2>&1)" || rc=$?
-expected='./backend/... ./companion/... ./plugin/... ./proto/...'
+expected='./backend/... ./proto/...'
 if [ "$rc" -eq 0 ] && [ "$out" = "$expected" ]; then
-	report 0 "workspace_modules.sh prints the four go.work globs in order"
+	report 0 "workspace_modules.sh prints the two go.work globs in order"
 else
-	report 1 "workspace_modules.sh prints the four go.work globs in order (rc=$rc, out=<$out>)"
+	report 1 "workspace_modules.sh prints the two go.work globs in order (rc=$rc, out=<$out>)"
 fi
 
 # --------------------------------------------------------------------------
@@ -102,7 +102,7 @@ fi
 #    before any `go list`, so no real Go build is stood up.
 # --------------------------------------------------------------------------
 f="$(make_fixture unknown_module)"
-printf 'go 1.27\n\nuse (\n\t./proto\n\t./backend\n\t./companion\n\t./plugin\n\t./frontend\n)\n' > "$f/go.work"
+printf 'go 1.27\n\nuse (\n\t./proto\n\t./backend\n\t./frontend\n)\n' > "$f/go.work"
 stub_gomod "$f/frontend" example.com/frontend
 rc=0
 out="$(bash "$f/scripts/check_deps.sh" 2>&1)" || rc=$?

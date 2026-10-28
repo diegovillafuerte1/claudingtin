@@ -8,7 +8,7 @@
     {
       "name": "claudingtin",
       "source": "./plugin",
-      "description": "Turns Claude Code think-time into a chat roulette: while the model works, a companion connects you to someone else who is waiting.",
+      "description": "Turns Claude Code think-time into a chat roulette: while the model works, claudingtin connects you to someone else who is waiting.",
       "version": "0.1.0"
     }
   ]

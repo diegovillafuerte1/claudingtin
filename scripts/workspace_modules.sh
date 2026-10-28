@@ -98,7 +98,7 @@ if [ "${1:-}" != "" ]; then
 fi
 
 # Default: the Story 1.1 explicit multi-module pattern, on one line, in go.work
-# order — a drop-in for `./proto/... ./backend/... ./companion/... ./plugin/...`.
+# order — a drop-in for `./backend/... ./proto/...`.
 out=""
 for d in "${use_dirs[@]}"; do
 	out="$out ./$d/..."

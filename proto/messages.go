@@ -21,12 +21,12 @@ import (
 // TypeHello is the discriminator for Hello.
 const TypeHello = "hello"
 
-// Hello is the first frame a /ws client sends, and the POST /v1/hello body. It
-// carries the client's protocol version and the account key that is the user's
-// whole identity to the backend. SessionID, when non-empty, names a session
-// this connection wants to resume within the backend's reconnect grace window
-// (Story 3.4); a plain connect or fresh re-match omits it, so the wire form is
-// unchanged for every caller that does not set it.
+// Hello is the POST /v1/hello body. It carries the client's protocol version
+// and the account key that is the user's whole identity to the backend.
+// SessionID, when non-empty, names a session this client wants to resume
+// within the backend's reconnect grace window (Story 3.4); a plain connect or
+// fresh re-match omits it, so the wire form is unchanged for every caller that
+// does not set it.
 type Hello struct {
 	AccountKey      string `json:"account_key"`
 	ProtocolVersion int    `json:"protocol_version"`
@@ -173,8 +173,8 @@ type Error struct {
 }
 
 // TypePleaseUpdate is the discriminator for PleaseUpdate. It is its own type,
-// sent on an unsupported client version (before the /ws socket closes, or as the
-// POST /v1/hello response with no handle minted) — never an Error code.
+// sent on an unsupported client version (as the POST /v1/hello response, with
+// no handle minted) — never an Error code.
 const TypePleaseUpdate = "please_update"
 
 // PleaseUpdate tells the client its version is too old to be served.

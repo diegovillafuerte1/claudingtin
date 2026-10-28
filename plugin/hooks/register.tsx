@@ -7,7 +7,7 @@ import { onSafetyClose, openSafety, renderSafety, requireGate } from './safety'
 
 export { requireGate } from './safety'
 
-const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8080'
+export const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8080'
 const POLL_MS = 5000
 const POLL_TIMEOUT_MS = 4000
 

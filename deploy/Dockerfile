@@ -5,8 +5,8 @@
 # sibling resolves in workspace mode — then a `scratch` runtime carries just the
 # binary (plus CA roots for future outbound TLS).
 #
-# serve is a stub in Epic 1; this image only needs it to compile and launch.
-# Real serve logic (PORT, the websocket upgrade, GET /status) lands in Story 1.4.
+# serve reads PORT (default 8080) and serves GET /status and the /v1 long-poll
+# transport.
 
 FROM golang:1.27 AS build
 WORKDIR /src
