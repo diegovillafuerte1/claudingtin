@@ -1,8 +1,8 @@
 // Package proto is the single source of truth for the claudingtin wire
 // contract: the message envelope, the protocol version, and every v1 message
 // shape plus its encode/decode helpers. It is transport-neutral: the same
-// messages travel as /ws frames and as /v1 HTTPS request bodies, response
-// bodies and long-poll events.
+// messages travel as /v1 HTTPS request bodies, response bodies and long-poll
+// events.
 //
 // It imports no sibling module and no third-party package — only the Go standard
 // library. The backend imports it; the mod's TypeScript types are checked

@@ -2,14 +2,12 @@
 # Dependency-direction check for the claudingtin monorepo.
 #
 # Allowed edges only:
-#   companion -> proto
-#   backend   -> proto
+#   backend -> proto
 #
 # Invariants enforced:
 #   - proto imports no sibling module and no third-party package
-#   - nothing (proto, backend, companion) imports plugin
-#   - plugin imports no sibling module (it execs the companion binary by path)
-#   - backend and companion each really do import proto (the edge is not dead)
+#   - backend imports no sibling but proto
+#   - backend really does import proto (the edge is not dead)
 #
 # Test files are included (`go list -deps -test`), so a forbidden import added
 # only in a _test.go file is still caught.
@@ -22,7 +20,7 @@
 #
 # The module set checked is enumerated from go.work by scripts/workspace_modules.sh
 # — there is no hardcoded module list here. The direction rules below are still
-# keyed to the known module names (proto/backend/companion/plugin); a module
+# keyed to the known module names (proto/backend); a module
 # added to go.work under any other name makes this check FAIL LOUDLY until
 # matching rules are added for it here.
 set -euo pipefail
@@ -74,7 +72,7 @@ has() { printf '%s\n' "$1" | grep -qx "$2"; }
 # Resolve each module's dependency list once, failing loudly on a compile error.
 # The module set is the go.work-derived list shared with CI — strip the leading
 # `./` and trailing `/...` that workspace_modules.sh wraps each directory in.
-proto_deps=""; backend_deps=""; companion_deps=""; plugin_deps=""
+proto_deps=""; backend_deps=""
 modules="$(bash "$repo_root/scripts/workspace_modules.sh" | sed 's#\./##g; s#/\.\.\.##g')"
 
 # The direction rules further down are keyed to these known module names. If
@@ -82,7 +80,7 @@ modules="$(bash "$repo_root/scripts/workspace_modules.sh" | sed 's#\./##g; s#/\.
 # would be a false OK — fail loudly instead until rules are written for it.
 known_module() {
 	local k
-	for k in proto backend companion plugin; do
+	for k in proto backend; do
 		[ "$1" = "$k" ] && return 0
 	done
 	return 1
@@ -132,30 +130,12 @@ if [ -n "$proto_tp" ]; then
 	fail=1
 fi
 
-# backend / companion: proto only.
+# backend: proto only.
 check_no_sibling_beyond backend "$backend_deps" proto
-check_no_sibling_beyond companion "$companion_deps" proto
 
-# plugin: no siblings at all.
-check_no_sibling_beyond plugin "$plugin_deps"
-
-# nothing imports plugin.
-if has "$(siblings_used "$proto_deps")" plugin; then
-	echo "FAIL: proto imports plugin — plugin must be unreferenced" >&2; fail=1
-fi
-if has "$(siblings_used "$backend_deps")" plugin; then
-	echo "FAIL: backend imports plugin — plugin must be unreferenced" >&2; fail=1
-fi
-if has "$(siblings_used "$companion_deps")" plugin; then
-	echo "FAIL: companion imports plugin — plugin must be unreferenced" >&2; fail=1
-fi
-
-# the allowed edges must actually exist.
+# the allowed edge must actually exist.
 if ! has "$(siblings_used "$backend_deps")" proto; then
 	echo "FAIL: backend does not import proto — expected edge is missing" >&2; fail=1
-fi
-if ! has "$(siblings_used "$companion_deps")" proto; then
-	echo "FAIL: companion does not import proto — expected edge is missing" >&2; fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then
@@ -164,7 +144,5 @@ if [ "$fail" -ne 0 ]; then
 fi
 
 echo "dependency-direction check OK — verified edges:"
-echo "  companion → proto"
-echo "  backend   → proto"
-echo "  proto     → ∅   (no sibling, no third-party)"
-echo "  plugin        unreferenced by proto/backend/companion; imports no sibling"
+echo "  backend → proto"
+echo "  proto   → ∅   (no sibling, no third-party)"

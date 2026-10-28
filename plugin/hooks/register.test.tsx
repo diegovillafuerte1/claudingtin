@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing'
-import { normalizeBaseUrl } from './register'
+import { DEFAULT_BACKEND_URL, normalizeBaseUrl } from './register'
 
 const BAND = {
   plugin: 'claudingtin',
@@ -115,9 +115,14 @@ test('single trailing slash is stripped', { options: { backendUrl: 'http://h:1/'
   expect(seen[0]).toBe('http://h:1/status')
 })
 
-test('unset config: polls the manifest default (127.0.0.1:8080)', async ($, on) => {
+// The manifest test. No options means the manifest's userConfig defaults: the
+// first fetch proves plugin.json's backendUrl default equals the code's, and the
+// band drawing proves hooks.json loaded register.tsx (the kit loads the plugin
+// from its folder the way the engine does).
+test('manifest: hooks.json loads the mod and the userConfig default matches the code', async ($, on) => {
   const { seen } = await start($, on, () => status(200))
-  expect(seen[0]).toBe('http://127.0.0.1:8080/status')
+  expect(seen[0]).toBe(`${DEFAULT_BACKEND_URL}/status`)
+  expect(await bandText($)).toBe('claudingtin · connected')
 })
 
 test('blank backendUrl falls back to the code default', { options: { backendUrl: '   ' } }, async ($, on) => {

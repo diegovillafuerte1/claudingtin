@@ -2,9 +2,9 @@ import type { EngineInterface } from 'claude-code'
 import { chmod600, configDir, joinPath } from './configdir'
 
 // The account key, byte-compatible with the companion's
-// (companion/internal/identity): one canonical lowercase UUIDv4 and a newline
-// in <configDir>/account-key, mode 0600. A missing, empty, oversized or
-// non-canonical file is regenerated; a file that exists but cannot be read is
+// (companion/internal/identity, deleted in Story 7.6): one canonical lowercase
+// UUIDv4 and a newline in <configDir>/account-key, mode 0600. A missing, empty,
+// oversized or non-canonical file is regenerated; a file that exists but cannot be read is
 // left alone. The key is never logged, shown, kept in $.state or $.store, or
 // put in an error.
 

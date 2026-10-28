@@ -12,9 +12,9 @@ import (
 	"github.com/diegovillafuerte1/claudingtin/proto"
 )
 
-// newSession builds a Session with just the fields the hub touches. Conn stays
-// nil — the hub goroutine never dereferences it. Outbound is buffered like the
-// real one so the hub's non-blocking delivery lands instead of being dropped.
+// newSession builds a Session with just the fields the hub touches. Outbound is
+// buffered like the real one so the hub's non-blocking delivery lands instead
+// of being dropped.
 func newSession(key string) *Session {
 	return &Session{Key: key, Evict: make(chan struct{}), Outbound: make(chan any, 4)}
 }

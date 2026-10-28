@@ -16,20 +16,18 @@ import (
 	"context"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/diegovillafuerte1/claudingtin/backend"
 	"github.com/diegovillafuerte1/claudingtin/proto"
 )
 
-// Session is one connected account key: its websocket connection, an evict
+// Session is one connected account key: an evict
 // channel the hub closes to signal that a newer connection for the same key has
 // taken over, and a buffered Outbound channel the hub uses to hand the
 // connection handler a proto frame to write (queued / matched / session_ended).
 // The hub goroutine only ever closes Evict and does a non-blocking send on
-// Outbound; it never reads or writes Conn and never blocks on Outbound.
+// Outbound; it never blocks on Outbound.
 //
-// Field ownership: Key, Conn, Evict, and Outbound are set once by the caller
+// Field ownership: Key, Evict, and Outbound are set once by the caller
 // before Register and never mutated by the hub. SessionID is hub-owned: it is
 // minted in drainQueue at match time and read back at a later resume attempt
 // to decide whether a reconnect names the same session. ResumeSessionID is written
@@ -43,7 +41,6 @@ import (
 // (Story 3.5).
 type Session struct {
 	Key      string
-	Conn     *websocket.Conn
 	Evict    chan struct{}
 	Outbound chan any
 
@@ -176,7 +173,7 @@ func (h *Hub) Run(ctx context.Context) {
 							p.pairings[peer] = cmd.s
 							cmd.s.SessionID = prev.SessionID
 							// cmd.s is a brand-new *Session (fresh per
-							// websocket connection), so its WantsMatch is
+							// /v1 hello), so its WantsMatch is
 							// still the zero value false regardless of what
 							// prev's was. Without carrying it over, a
 							// resumed session would silently lose Story
@@ -225,8 +222,8 @@ func (h *Hub) Run(ctx context.Context) {
 					// takeover branch above just tore it down). Either way,
 					// tell this new connection its named session ended, on its
 					// own Outbound, so a stale local pane resets via the
-					// existing cause-agnostic frame. No companion branching —
-					// client.SessionEnded() already handles this.
+					// existing cause-agnostic frame. No client branching —
+					// the mod already handles a bare session_ended.
 					deliver(cmd.s, proto.SessionEnded{})
 				}
 				sessions[cmd.s.Key] = cmd.s
@@ -411,7 +408,7 @@ func (p *pairingState) teardownPair(s *Session) {
 }
 
 // relay hands msg to from's paired peer and to no one else — the sender is never
-// echoed its own line (the companion already showed it optimistically, keyed by
+// echoed its own line (the client already showed it optimistically, keyed by
 // client_msg_id). It is a no-op if from is not paired: a chat line from a
 // session that was never matched, or whose pairing has already been torn down,
 // is dropped silently with no error frame. The frame reaches the peer only by

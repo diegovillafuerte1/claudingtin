@@ -1,6 +1,6 @@
 # Build context for deploy/Dockerfile — only the Go workspace needs to reach the
 # builder. Keep this in sync with what the build actually reads (go.work + the
-# four module trees).
+# proto and backend module trees).
 
 .git/
 .github/
@@ -8,8 +8,8 @@
 _bmad-output/
 _bmad*/
 
-# Committed cross-built companion binaries — not part of the backend build.
-plugin/bin/
+# The mod (TypeScript) — not part of the backend build.
+plugin/
 
 # Local build / test artifacts
 **/*.exe

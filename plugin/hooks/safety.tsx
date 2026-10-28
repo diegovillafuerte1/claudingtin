@@ -4,8 +4,8 @@ import { chmod600, configDir, joinPath } from './configdir'
 import { loadAccountKey } from './identity'
 
 // The first-run gate, byte-compatible with the companion's
-// (companion/internal/safety): <configDir>/safety-ack holds
-// `version 1\naccepted_at <ms>\n`, and only version 1 counts. Acceptance is
+// (companion/internal/safety, deleted in Story 7.6): <configDir>/safety-ack
+// holds `version 1\naccepted_at <ms>\n`, and only version 1 counts. Acceptance is
 // local only: nothing about it is ever sent anywhere.
 
 export const SAFETY_PANE_ID = 'claudingtin-safety'

@@ -1,8 +1,8 @@
-// Command serve is the claudingtin backend: a websocket upgrade endpoint at /ws
-// that reads a versioned hello and tracks one connection per account key, plus
-// GET /status for the maintainer view. Configuration is environment only — PORT,
-// default 8080. Logs are structured JSON on stdout and carry no account key and
-// no frame text.
+// Command serve is the claudingtin backend: the /v1 HTTPS long-poll transport
+// (versioned hello, held event polls, sends; one live handle per account key),
+// plus GET /status for the maintainer view. Configuration is environment only —
+// PORT, default 8080. Logs are structured JSON on stdout and carry no account
+// key and no frame text.
 package main
 
 import (
@@ -57,7 +57,7 @@ func main() {
 		Addr:    net.JoinHostPort("", port),
 		Handler: server.New(h, logger),
 		// Only ReadHeaderTimeout is set on purpose: a whole-request ReadTimeout
-		// or WriteTimeout would tear down the long-lived /ws connections.
+		// or WriteTimeout would tear down the held /v1/events polls.
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 

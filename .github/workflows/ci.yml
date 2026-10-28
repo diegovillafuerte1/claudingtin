@@ -1,18 +1,15 @@
-# ci — build, vet, test, lint, cross-build, and image-build the workspace.
+# ci — build, vet, test, and lint the workspace, validate and test the mod, and
+# image-build the backend.
 #
 # Runs on every pull request and on push to main. Third-party Actions are pinned
 # to a released major-version tag and limited to the set agreed for this repo:
-# actions/checkout, actions/setup-go, actions/upload-artifact, docker/login-action,
-# docker/build-push-action. The Go version always comes from go.work via
-# setup-go's go-version-file — never a literal here.
+# actions/checkout, actions/setup-go, docker/login-action, docker/build-push-action.
+# The Go version always comes from go.work via setup-go's go-version-file —
+# never a literal here.
 #
-# The test job runs on Linux, macOS, and Windows. The companion is
-# cross-compiled for all three and has OS-sensitive runtime paths (the fsnotify
-# transcript tailer and its symlink handling, process signalling); running the
-# suite on every OS is standing regression insurance, not tied to any one story.
-# Tests run under `-race` on every OS: the backend hub and the wsclient are
-# genuinely concurrent, and the OS-specific fsretry paths are exactly where a
-# data race would hide (epic-1 retrospective, finding F1).
+# The test job runs on Linux, macOS, and Windows as standing regression
+# insurance. Tests run under `-race` on every OS: the backend hub and the /v1
+# long-poll transport are genuinely concurrent (epic-1 retrospective, finding F1).
 
 name: ci
 
@@ -93,47 +90,22 @@ jobs:
       - name: guard self-tests
         run: bash scripts/checks_test.sh
 
-  cross-build:
-    name: cross-build (${{ matrix.goos }}/${{ matrix.goarch }})
+  plugin:
+    # The mod (TypeScript in plugin/) is not a Go module: Claude Code itself
+    # validates and tests it. Pinned to an exact version because the mods API is
+    # early access and may churn between releases. Node and npm come with the
+    # runner image, so no extra Action is needed.
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { goos: darwin, goarch: arm64, asset: companion-darwin-arm64, launcher: session-start-darwin-arm64 }
-          - { goos: darwin, goarch: amd64, asset: companion-darwin-amd64, launcher: session-start-darwin-amd64 }
-          - { goos: linux, goarch: amd64, asset: companion-linux-amd64, launcher: session-start-linux-amd64 }
-          - { goos: windows, goarch: amd64, asset: companion-windows-amd64.exe, launcher: session-start-windows-amd64.exe }
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.work
-          cache: false
-      - name: build companion
-        shell: bash
-        run: |
-          mkdir -p dist
-          cd companion
-          CGO_ENABLED=0 GOOS='${{ matrix.goos }}' GOARCH='${{ matrix.goarch }}' \
-            go build -trimpath -o "../dist/${{ matrix.asset }}" .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
-          if-no-files-found: error
-      - name: build session-start launcher
-        shell: bash
-        run: |
-          mkdir -p dist
-          cd plugin
-          CGO_ENABLED=0 GOOS='${{ matrix.goos }}' GOARCH='${{ matrix.goarch }}' \
-            go build -trimpath -o "../dist/${{ matrix.launcher }}" ./cmd/session-start
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.launcher }}
-          path: dist/${{ matrix.launcher }}
-          if-no-files-found: error
+      - name: install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.311
+      - name: hooks.json loads only the mod module
+        run: jq -e '.modules == ["./register.tsx"] and (has("hooks") | not)' plugin/hooks/hooks.json
+      - name: validate
+        run: claude plugin validate --strict plugin
+      - name: test
+        run: claude plugin test plugin
 
   backend-image:
     runs-on: ubuntu-latest
