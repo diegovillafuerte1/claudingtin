@@ -12,8 +12,16 @@ This repository holds a Go workspace (`go.work`) over two modules — `proto` an
 
 ## Backend
 
-`backend serve` (`./backend/cmd/serve`) reads one environment variable — `PORT`,
-default `8080` when unset or empty — and exposes exactly four HTTP routes:
+`backend serve` (`./backend/cmd/serve`) reads two environment variables:
+
+- **`PORT`** — default `8080` when unset or empty.
+- **`DB_PATH`** — the SQLite policy store, default `claudingtin.db` (the image
+  sets `/data/claudingtin.db`; mount a volume there). It is opened WAL with a
+  busy timeout so the maintainer tools can share it, and migrated forward-only
+  on start from the embedded `backend/migrations/`. `serve` refuses to start if
+  it cannot open, migrate or load it, or if it is newer than the binary.
+
+It exposes exactly four HTTP routes:
 
 - **`POST /v1/hello`** — body is a `hello` carrying `protocol_version` and the
   account key. `protocol_version >= PROTOCOL_VERSION - 1` is accepted (including
@@ -40,8 +48,11 @@ account key and no frame text**. The process shuts down gracefully on `SIGINT` /
 
 A single-writer hub goroutine owns the strict-FIFO wait queue, the pairings,
 the `session_id` mint and the opener rotation (`backend/openers.txt`, one opener
-per line, embedded at build time; voice guide `backend/openers.md`). All of it is
-in memory and dies with the process. A `chat_msg` is relayed to the paired peer
+per line, embedded at build time; voice guide `backend/openers.md`). All of that
+is in memory and dies with the process. The hub also holds the policy (blocks,
+cooldowns and bans), loaded from the store once at startup. Matching reads only
+that in-memory copy; a policy change writes through to SQLite, and a banned key
+never joins the queue. A `chat_msg` is relayed to the paired peer
 only — never echoed back, never parsed, and never logged.
 
 ## The mod
@@ -85,8 +96,9 @@ corrupt and replaced. The key appears in no log or UI.
 ## Development
 
 Requires Go 1.27.x and Claude Code (for the mod). `proto` is stdlib-only by
-rule (`scripts/check_deps.sh`); `backend` currently has no third-party
-dependencies either, so building and testing needs no module downloads.
+rule (`scripts/check_deps.sh`); `backend`'s one third-party dependency is the
+pure-Go SQLite driver `modernc.org/sqlite` (no cgo, so every target
+cross-builds with `CGO_ENABLED=0`).
 
 From the repository root (Go's `./...` does not span workspace modules on its own, so name them):
 

@@ -322,3 +322,13 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-3-7-session-id-keepsake-on-persisted-chat-end.md`
   summary: A chat Pane closed with a non-person origin (unload on plugin reload) leaves `placed: true` in the surviving chat atom, so the band hint (chat or keepsake) is suppressed until something reopens the Pane.
   evidence: onChatClose only handles origin 'person'; resumeChat does not reconcile `placed` with the panes actually open (pre-existing since 7.5, now also affects the 3.7 keepsake).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-1-persisted-policy-store-and-single-writer-load.md`
+  summary: A queue head with no eligible successor (blocked or on cooldown with every waiter within maxScan) stalls the whole queue behind it, per AD-8's "the head waits"; with real block/cooldown volume this needs a fairness rule (e.g. let later pairs form past a stuck head).
+  evidence: drainQueue breaks when firstEligibleSuccessor fails for the head; Story 4.1 made block/cooldown predicates live, so the stall is now reachable (bans are excluded at enqueue, so they cannot cause it).
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-1-persisted-policy-store-and-single-writer-load.md`
+  summary: Cooldown expiry triggers no re-drain, and expired cooldown rows are never pruned from SQLite; Story 4.4 (auto-cooldown) should add an expiry timer that re-drains and a prune (DELETE … WHERE expires_ms <= now).
+  evidence: policyState.allows only re-checks expiry when another command drains; TestCooldownExpiresAndThePairBecomesEligible needs a third arrival to pair a/b.
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-1-persisted-policy-store-and-single-writer-load.md`
+  summary: Write-through runs synchronously on the hub goroutine (bounded at 2 s by writeBudget); if 4.4's cooldown write volume or CLI lock contention shows up as hub latency, move writes to an ordered writer goroutine.
+  evidence: Spec Design Notes accepted synchronous writes; reviewers flagged the stall risk under a CLI-held write lock.

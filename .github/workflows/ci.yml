@@ -127,4 +127,21 @@ jobs:
           context: .
           file: deploy/Dockerfile
           push: ${{ github.event_name == 'push' }}
-          tags: ghcr.io/diegovillafuerte1/claudingtin-backend:edge
+          load: true
+          tags: |
+            ghcr.io/diegovillafuerte1/claudingtin-backend:edge
+            claudingtin-backend:ci
+      # The image's DB_PATH contract (Story 4.1): serve starts and creates
+      # /data/claudingtin.db, so policy lands on the volume, not the image root.
+      - name: smoke-run the image
+        run: |
+          docker run -d --name ct -p 18080:8080 claudingtin-backend:ci
+          for i in $(seq 1 30); do
+            curl -fsS localhost:18080/status && break
+            sleep 1
+          done
+          curl -fsS localhost:18080/status
+          docker cp ct:/data/claudingtin.db /tmp/claudingtin.db
+          test -s /tmp/claudingtin.db
+          docker logs ct
+          docker rm -f ct
