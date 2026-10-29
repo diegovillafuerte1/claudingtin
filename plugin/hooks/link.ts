@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginState } from 'claude-code'
 import type { Presence } from '../types'
-import { applyEvents, clearBack, onModelBack, resetChat } from './chat'
+import { applyEvents, clearBack, markKept, onModelBack, resetChat } from './chat'
 import type { ChatEvent } from './chat'
 import { loadAccountKey } from './identity'
 import { requireGate } from './safety'
@@ -96,7 +96,10 @@ export async function onTurnEnd($: EngineInterface, base: string): Promise<void>
       await setLink($, (l) => ({ ...l, want: 'busy', held: true }))
     } catch {
       await clearBack($)
+      return
     }
+    // Only a committed hold makes the chat kept (its end offers the keepsake).
+    await markKept($)
     return // nothing to send: the hold keeps the backend as it is
   }
   try {

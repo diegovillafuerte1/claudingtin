@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, RenderInput } from 'claude-code'
-import type { Chat, ChatLine, ChatMatch } from '../types'
+import type { EngineInterface, RenderInput, RenderSurface } from 'claude-code'
+import type { Chat, ChatLine, ChatMatch, Keepsake } from '../types'
 import { getLink, releaseHold, sendNow, sendSeqNow } from './link'
 
 // The chat surface (Story 7.5): the events the /v1 poll hands over drive a
@@ -33,6 +33,12 @@ export const COPY = {
   persistOn: "persist is on — your next chat stays open when your claude's back",
   persistOff: "persist is off — chats end when your claude's back",
   persistFailed: "couldn't change persist here.",
+  keepNote: "this chat's id — the only way to find them again",
+  keepCopy: 'copy id',
+  keepDone: 'done',
+  keepCopied: 'copied',
+  keepFailed: "no clipboard here — the id's above",
+  keepBand: "claudingtin · keep this chat's id — /claudingtin chat",
 } as const
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const
@@ -40,7 +46,7 @@ export const FLOURISH = ['◐', '◓', '◑', '◒', '◐', '◓'] as const
 const SPIN_MS = 100
 const FLOURISH_MS = 90
 
-const IDLE: Chat = { phase: 'idle', match: null, lines: [], ended: false, placed: false, left: false, persist: false, back: false }
+const IDLE: Chat = { phase: 'idle', match: null, lines: [], ended: false, placed: false, left: false, persist: false, back: false, kept: false, keepsake: null }
 
 export const chat = atom({ plugin: 'claudingtin', key: 'chat' } as const, IDLE)
 
@@ -160,6 +166,13 @@ async function getChat($: EngineInterface): Promise<Chat> {
   return { ...IDLE, ...(await read($, chat)) }
 }
 
+/** The offer a kept chat leaves when it ends, or null (not kept, no chat, no id). */
+function keepsakeOf(c: Chat): Keepsake | null {
+  if (!c.kept || c.phase !== 'chatting' || c.match === null) return null
+  const id = oneLine(c.match.sessionId)
+  return id === '' ? null : { id, copy: 'none' }
+}
+
 async function burstActive($: EngineInterface): Promise<boolean> {
   try {
     return (await getLink($)).want === 'ready'
@@ -213,7 +226,8 @@ async function applyEvent($: EngineInterface, ev: ChatEvent, base: string | unde
       }
       flourish = 0
       const persist = persistSetting
-      await setChat($, () => ({ phase: 'chatting', match, lines: [], ended: false, placed: false, left: false, persist, back: false }))
+      // A pending keepsake is replaced: the new chat takes the Pane.
+      await setChat($, () => ({ ...IDLE, phase: 'chatting', match, persist }))
       // Not awaited: an open that never settles must not stall the poll loop.
       void openForMatch($, match.sessionId)
       return
@@ -236,8 +250,16 @@ async function applyEvent($: EngineInterface, ev: ChatEvent, base: string | unde
       await setChat($, (c) =>
         c.phase !== 'chatting'
           ? c
-          : // Unplaced (narrow), the ended line would never be seen: nothing lingers.
-            { ...c, phase: searching ? 'searching' : 'idle', match: null, lines: [], ended: c.placed, left: false, back: false },
+          : // Unplaced (narrow), the ended line would never be seen, so it is
+            // dropped; a keepsake stays for the band to hint at.
+            {
+              ...IDLE,
+              phase: searching ? 'searching' : 'idle',
+              ended: c.placed,
+              placed: c.placed,
+              persist: c.persist,
+              keepsake: keepsakeOf(c),
+            },
       )
       const held = (await getLink($)).held
       if (held) {
@@ -299,11 +321,13 @@ export async function leaveChat($: EngineInterface, base: string, kind: LeaveKin
   try {
     const searching = await burstActive($)
     let left = false
+    let offer: Keepsake | null = null
     await setChat($, (c) => {
       left = c.phase === 'chatting' && !c.left
-      return left
-        ? { ...IDLE, phase: searching ? 'searching' : 'idle', left: true }
-        : c
+      if (!left) return c
+      // Leaving keeps the thread back; blocking or reporting never does.
+      offer = kind === 'leave' ? keepsakeOf(c) : null
+      return { ...IDLE, phase: searching ? 'searching' : 'idle', left: true, keepsake: offer, placed: offer !== null && c.placed }
     })
     if (!left) return false
     // In order on the wire (block / report settles before the leave goes), never awaited here.
@@ -315,7 +339,8 @@ export async function leaveChat($: EngineInterface, base: string, kind: LeaveKin
     void sendSeqNow($, base, bodies)
       .then(() => releaseHold($, base))
       .catch(() => {})
-    closePane($)
+    // A keepsake stays on the Pane (or the band, when it is not placed).
+    if (offer === null) closePane($)
     return true
   } catch {
     return false
@@ -327,11 +352,16 @@ export async function resetChat($: EngineInterface): Promise<void> {
   try {
     flourish = null
     let had = false
+    let offer: Keepsake | null = null
     await setChat($, (c) => {
       had = c.phase !== 'idle' || c.ended || c.match !== null || c.lines.length > 0 || c.placed
-      return had ? { ...IDLE } : c
+      if (!had) return c
+      // A kept chat ending here offers its keepsake; one already pending stays.
+      offer = keepsakeOf(c) ?? c.keepsake
+      if (offer === null) return { ...IDLE }
+      return { ...IDLE, keepsake: offer, placed: c.placed, ended: c.match === null && c.ended }
     })
-    if (had) closePane($)
+    if (had && offer === null) closePane($)
   } catch {
     // Quiet.
   }
@@ -359,6 +389,15 @@ export async function onModelBack($: EngineInterface, canHold: boolean): Promise
   }
 }
 
+/** The hold landed: the chat outlived the burst and is kept (Story 3.7). Never throws. */
+export async function markKept($: EngineInterface): Promise<void> {
+  try {
+    await setChat($, (c) => (c.phase === 'chatting' && c.back && !c.kept ? { ...c, kept: true } : c))
+  } catch {
+    // Quiet.
+  }
+}
+
 /** A new burst began: the "your claude's back" note goes. Never throws. */
 export async function clearBack($: EngineInterface): Promise<void> {
   try {
@@ -372,8 +411,10 @@ export async function clearBack($: EngineInterface): Promise<void> {
 export async function openChat($: EngineInterface): Promise<'open' | 'none' | 'unplaced'> {
   try {
     const c = await getChat($)
-    if (c.phase !== 'chatting' || c.match === null) return 'none'
-    const sessionId = c.match.sessionId
+    const chatting = c.phase === 'chatting' && c.match !== null
+    if (!chatting && c.keepsake === null) return 'none'
+    const sessionId = chatting ? c.match!.sessionId : null
+    const keepId = c.keepsake?.id ?? null
     let placed = false
     try {
       const r = await $.ui.open({ id: CHAT_PANE_ID, title: 'claudingtin', focus: true, rows: 16 })
@@ -381,7 +422,10 @@ export async function openChat($: EngineInterface): Promise<'open' | 'none' | 'u
     } catch {
       placed = false
     }
-    await setChat($, (s) => (s.phase === 'chatting' && s.match?.sessionId === sessionId ? { ...s, placed } : s))
+    await setChat($, (s) => {
+      if (sessionId !== null) return s.phase === 'chatting' && s.match?.sessionId === sessionId ? { ...s, placed } : s
+      return s.phase !== 'chatting' && s.keepsake?.id === keepId ? { ...s, placed } : s
+    })
     return placed ? 'open' : 'unplaced'
   } catch {
     return 'unplaced'
@@ -392,7 +436,42 @@ export async function openChat($: EngineInterface): Promise<'open' | 'none' | 'u
 export async function onChatClose($: EngineInterface, origin: { kind?: string } | undefined): Promise<void> {
   if (origin?.kind !== 'person') return
   try {
-    await setChat($, (c) => ({ ...c, placed: false, ended: false }))
+    // Closing it dismisses a keepsake too.
+    await setChat($, (c) => ({ ...c, placed: false, ended: false, keepsake: c.phase === 'chatting' ? c.keepsake : null }))
+  } catch {
+    // Quiet.
+  }
+}
+
+/** `copy id`: the keepsake onto the pressing surface's clipboard; the result shows under it. Never throws. */
+export async function copyKeepsake($: EngineInterface, surface: RenderSurface | undefined): Promise<void> {
+  try {
+    const k = (await getChat($)).keepsake
+    if (k === null) return
+    let copied = false
+    try {
+      const r = await $.ui.copy(surface === undefined ? { text: k.id } : { text: k.id, surface })
+      copied = r?.isCopied === true
+    } catch {
+      copied = false
+    }
+    const copy: Keepsake['copy'] = copied ? 'copied' : 'failed'
+    await setChat($, (c) => (c.keepsake?.id === k.id ? { ...c, keepsake: { ...c.keepsake, copy } } : c))
+  } catch {
+    // Quiet.
+  }
+}
+
+/** `done`: the keepsake goes and, outside a chat, the Pane closes. Never throws. */
+export async function dismissKeepsake($: EngineInterface): Promise<void> {
+  try {
+    let close = false
+    await setChat($, (c) => {
+      if (c.keepsake === null) return c
+      close = c.phase !== 'chatting'
+      return close ? { ...c, keepsake: null, ended: false, placed: false } : { ...c, keepsake: null }
+    })
+    if (close) closePane($)
   } catch {
     // Quiet.
   }
@@ -417,6 +496,7 @@ export function bandLine(c: Chat): string | null {
   if (c.phase === 'searching') return `${SPINNER[frame % SPINNER.length]} ${COPY.searching}`
   if (c.phase === 'chatting' && !c.placed) return `claudingtin · chatting with ${peerName(c.match)} — /claudingtin chat`
   if (c.phase === 'chatting' && c.back) return COPY.heldBand
+  if (c.phase === 'idle' && c.keepsake !== null && !c.placed) return COPY.keepBand
   return null
 }
 
@@ -437,11 +517,42 @@ export async function renderChat($: EngineInterface, e: RenderInput<'Pane'>, bas
   const Input = 'Input' in table ? table.Input : null
 
   if (c.phase !== 'chatting' || c.match === null) {
+    const k = c.keepsake
+    if (k === null) {
+      return (
+        <Box key="claudingtin-chat" flexDirection="column">
+          <Text key="ended" wrap="wrap">
+            {c.ended ? COPY.ended : COPY.noChat}
+          </Text>
+        </Box>
+      )
+    }
     return (
       <Box key="claudingtin-chat" flexDirection="column">
-        <Text key="ended" wrap="wrap">
-          {c.ended ? COPY.ended : COPY.noChat}
+        {c.ended ? (
+          <Text key="ended" wrap="wrap">
+            {COPY.ended}
+          </Text>
+        ) : null}
+        <Text key="keep-note" wrap="wrap">
+          {COPY.keepNote}
         </Text>
+        <Text key="keep-id" bold wrap="wrap">
+          {k.id}
+        </Text>
+        <Box key="keep-actions" flexDirection="row" gap={2}>
+          <Button
+            key="keep-copy"
+            label={k.copy === 'copied' ? COPY.keepCopied : COPY.keepCopy}
+            onPress={(p) => copyKeepsake($, p?.surface)}
+          />
+          <Button key="keep-done" label={COPY.keepDone} onPress={() => dismissKeepsake($)} />
+        </Box>
+        {k.copy === 'failed' ? (
+          <Text key="keep-failed" dimColor wrap="wrap">
+            {COPY.keepFailed}
+          </Text>
+        ) : null}
       </Box>
     )
   }

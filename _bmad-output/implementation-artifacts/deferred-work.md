@@ -318,3 +318,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-7-6-remove-the-companion-and-pane-placement.md`
   summary: The `case <-p.sess.Evict:` takeover arm in `backend/internal/server/v1.go` (`closeHandle` plus the "v1 taken over" log) is unreachable now that `/ws` is gone, and no test exercises it.
   evidence: A second /v1 hello closes the old handle before the hub evict arrives (`!h.closed` is false), and an older pump fails `h.pump == p`. The only test that asserted "v1 taken over" drove it via /ws and was removed in 7.6. Remove it or pin it with a hub-level test when hub takeover semantics are next touched.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-3-7-session-id-keepsake-on-persisted-chat-end.md`
+  summary: A chat Pane closed with a non-person origin (unload on plugin reload) leaves `placed: true` in the surviving chat atom, so the band hint (chat or keepsake) is suppressed until something reopens the Pane.
+  evidence: onChatClose only handles origin 'person'; resumeChat does not reconcile `placed` with the panes actually open (pre-existing since 7.5, now also affects the 3.7 keepsake).

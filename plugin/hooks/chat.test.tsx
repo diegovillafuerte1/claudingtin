@@ -1,5 +1,17 @@
 import { test, expect, mock } from 'claude-code/testing'
-import { applyEvents, capText, chatBand, inert, onChatClose, oneLine, submitLine } from './chat'
+import {
+  applyEvents,
+  capText,
+  chatBand,
+  clearBack,
+  inert,
+  markKept,
+  onChatClose,
+  onModelBack,
+  oneLine,
+  resetChat,
+  submitLine,
+} from './chat'
 
 // Story 7.5: the chat surface, through the plugin's own hooks with the world
 // mocked beneath it. The harness is link.test.ts's `start`, plus a pane log
@@ -687,6 +699,7 @@ const leaves = (log: Req[]) => sends(log).filter((m) => m.type === 'leave').leng
 const COPY_ENDED = "looks like their claude's back — catch you later"
 const BACK = "your claude's back"
 const HELD_BAND = "claudingtin · your claude's back — chat's still open"
+const KEEP_NOTE = "this chat's id — the only way to find them again"
 
 // Matched with persist on (the default: X sets no persist), then the person's Claude came back.
 async function held($: any, on: any, w: World = {}) {
@@ -718,20 +731,21 @@ test('held, peer ends: ended line, one busy, and a raced rematch in the batch is
     { seq: 4, type: 'queued', v: 1 },
     { ...MATCHED, seq: 5, session_id: 's-2' },
   ])
-  expect(await texts(await pane($))).toEqual([COPY_ENDED])
+  expect(await texts(await pane($))).toEqual([COPY_ENDED, KEEP_NOTE, 's-1'])
   expect(busies(log)).toBe(1)
   expect(opens.length).toBe(opened)
   expect(await bandText($)).toBe('claudingtin · connected')
 })
 
-test('held, own leave: exactly one leave, then the withheld busy, Pane closed', X, async ($, on) => {
+test('held, own leave: exactly one leave, then the withheld busy, Pane kept for the keepsake', X, async ($, on) => {
   const { clock, log, closes } = await held($, on)
   await runCommand($, 'leave')
   await clock.settle()
   expect(lines(log).filter((l) => l.startsWith('send')).slice(-2)).toEqual(['send leave', 'send busy'])
   expect(leaves(log)).toBe(1)
   expect(busies(log)).toBe(1)
-  expect(closes).toContainEqual({ id: 'claudingtin-chat', origin: 'plugin' })
+  expect(closes).toEqual([])
+  expect(await texts(await pane($))).toEqual([KEEP_NOTE, 's-1'])
 })
 
 for (const verb of ['block', 'report'] as const) {
@@ -743,12 +757,12 @@ for (const verb of ['block', 'report'] as const) {
   })
 }
 
-test('held, handle lost (events 410): hold dropped, chat reset, nothing more sent', X, async ($, on) => {
+test('held, handle lost (events 410): hold dropped, chat reset to the keepsake, nothing more sent', X, async ($, on) => {
   const { failPoll, log, closes } = await held($, on)
   const before = sends(log).length
   await failPoll({ status: 410 })
-  expect(closes).toContainEqual({ id: 'claudingtin-chat', origin: 'plugin' })
-  expect(await texts(await pane($))).toEqual(['no chat going right now.'])
+  expect(closes).toEqual([])
+  expect(await texts(await pane($))).toEqual([KEEP_NOTE, 's-1'])
   expect(sends(log).length).toBe(before)
 })
 
@@ -838,4 +852,262 @@ test('/claudingtin persist when the setting cannot change: a calm line', OFF, as
   })
   await start($, on)
   expect((await runCommand($, 'persist')).text).toBe("couldn't change persist here.")
+})
+
+// ---------------------------------------------------------------------------
+// Story 3.7: the session-ID keepsake.
+
+const KEEP_BAND = "claudingtin · keep this chat's id — /claudingtin chat"
+const buttons = async (ui: any) => (await ui.findAll({ type: 'Button' })).map((b: any) => b.props.label)
+
+test('kept, peer ends: ended line, note, the id as text, copy id and done', X, async ($, on) => {
+  const { feed } = await held($, on)
+  await feed([{ seq: 3, type: 'session_ended', v: 1 }])
+  const ui = await pane($)
+  expect(await texts(ui)).toEqual([COPY_ENDED, KEEP_NOTE, 's-1'])
+  expect(await buttons(ui)).toEqual(['copy id', 'done'])
+})
+
+for (const verb of ['block', 'report'] as const) {
+  test(`kept, ${verb}: no keepsake, Pane closed`, X, async ($, on) => {
+    const { clock, closes } = await held($, on)
+    await runCommand($, verb)
+    await clock.settle()
+    expect(closes).toContainEqual({ id: 'claudingtin-chat', origin: 'plugin' })
+    expect(await texts(await pane($))).toEqual(['no chat going right now.'])
+    expect(await bandText($)).not.toBe(KEEP_BAND)
+  })
+}
+
+test('kept, then a new burst, then the peer ends: keepsake on the Pane, spinner in the band', X, async ($, on) => {
+  const { clock, feed } = await held($, on)
+  await turnStart($, clock)
+  await feed([{ seq: 3, type: 'session_ended', v: 1 }])
+  expect(await texts(await pane($))).toEqual([COPY_ENDED, KEEP_NOTE, 's-1'])
+  expect(await bandText($)).toMatch(/^. looking for someone$/)
+})
+
+// The engine harness cannot make a live poll unholdable on cue, so this drives
+// the module: kept once, then a return that cannot hold ends it via resetChat.
+test('kept, then Claude back again with no poll to hold on: reset, keepsake offered', async () => {
+  const { $, chatState } = fakeChat$()
+  await applyEvents($, [MATCHED as any])
+  await flush()
+  expect(await onModelBack($, true)).toBe('hold')
+  await markKept($)
+  await clearBack($)
+  expect(await onModelBack($, false)).toBe('leave')
+  await resetChat($)
+  expect(chatState()).toMatchObject({ phase: 'idle', match: null, keepsake: { id: 's-1', copy: 'none' } })
+})
+
+test('not kept: a persist-on chat the peer ends mid-burst offers no id', X, async ($, on) => {
+  const { feed } = await matched($, on)
+  await feed([{ seq: 3, type: 'session_ended', v: 1, session_id: 's-1' }])
+  const ui = await pane($)
+  expect(await texts(ui)).toEqual([COPY_ENDED])
+  expect(await buttons(ui)).toEqual([])
+})
+
+test('not kept: persist off, Claude back offers no id', OFF, async ($, on) => {
+  const { clock } = await matched($, on)
+  await turnEnd($, clock)
+  expect(await texts(await pane($))).toEqual(['no chat going right now.'])
+  expect(await bandText($)).not.toBe(KEEP_BAND)
+})
+
+test('not kept: an own leave mid-burst offers no id and closes the Pane', X, async ($, on) => {
+  const { clock, closes } = await matched($, on)
+  await runCommand($, 'leave')
+  await clock.settle()
+  expect(closes).toContainEqual({ id: 'claudingtin-chat', origin: 'plugin' })
+  expect(await texts(await pane($))).toEqual(['no chat going right now.'])
+})
+
+test('copy id: onto the pressing surface\'s clipboard, then copied', X, async ($, on) => {
+  const copies: any[] = []
+  on('ui.copy', (_$: any, e: any) => {
+    copies.push({ ...e })
+    return { value: { isCopied: true } }
+  })
+  const { clock, feed } = await held($, on)
+  await feed([{ seq: 3, type: 'session_ended', v: 1 }])
+  const ui = await pane($)
+  await ui.press({ key: 'keep-copy' })
+  await clock.settle()
+  expect(copies.length).toBe(1)
+  expect(copies[0].text).toBe('s-1')
+  expect(copies[0].surface).toBe('terminal')
+  const after = await pane($)
+  expect(await texts(after)).toEqual([COPY_ENDED, KEEP_NOTE, 's-1'])
+  expect(await buttons(after)).toEqual(['copied', 'done'])
+})
+
+for (const [name, answer] of [
+  ['no clipboard', () => ({ value: { isCopied: false, reason: 'no-clipboard' } })],
+  ['copy throws', () => {
+    throw new Error('nope')
+  }],
+] as const) {
+  test(`copy id (${name}): a calm line, the id still shown`, X, async ($, on) => {
+    on('ui.copy', answer as any)
+    const { clock, feed } = await held($, on)
+    await feed([{ seq: 3, type: 'session_ended', v: 1 }])
+    await (await pane($)).press({ key: 'keep-copy' })
+    await clock.settle()
+    expect(await texts(await pane($))).toEqual([COPY_ENDED, KEEP_NOTE, 's-1', "no clipboard here — the id's above"])
+  })
+}
+
+test('done: the keepsake goes, Pane closed', X, async ($, on) => {
+  const { clock, feed, closes } = await held($, on)
+  await feed([{ seq: 3, type: 'session_ended', v: 1 }])
+  await (await pane($)).press({ key: 'keep-done' })
+  await clock.settle()
+  expect(closes).toContainEqual({ id: 'claudingtin-chat', origin: 'plugin' })
+  expect(await texts(await pane($))).toEqual(['no chat going right now.'])
+})
+
+test('narrow: a pending keepsake hints in the band; /claudingtin chat opens it', X, async ($, on) => {
+  const { clock, opens } = await held($, on, { open: (n) => (n === 1 ? { isPlaced: false, reason: 'narrow' } : { isPlaced: true }) })
+  await runCommand($, 'leave')
+  await clock.settle()
+  expect(await bandText($)).toBe(KEEP_BAND)
+  const r = await runCommand($, 'chat')
+  await clock.settle()
+  expect(r.text).toBeUndefined()
+  expect(opens.length).toBe(2)
+  expect(await texts(await pane($))).toEqual([KEEP_NOTE, 's-1'])
+  expect(await bandText($)).not.toBe(KEEP_BAND)
+})
+
+test('a new match replaces a pending keepsake: the new chat opens normally', X, async ($, on) => {
+  const { clock, feed } = await held($, on)
+  await runCommand($, 'leave')
+  await clock.settle()
+  await turnStart($, clock)
+  await feed([{ seq: 3, type: 'queued', v: 1 }])
+  await feed([{ ...MATCHED, seq: 4, session_id: 's-2', pseudonym: 'Bo' }])
+  await clock.advance(600)
+  const t = await texts(await pane($))
+  expect(t[0]).toBe("you're chatting with Bo")
+  expect(t).not.toContain(KEEP_NOTE)
+  expect(t).not.toContain('s-1')
+})
+
+test('an empty session_id: a kept chat offers nothing', X, async ($, on) => {
+  const s = await start($, on)
+  await turnStart($, s.clock)
+  await s.feed([{ seq: 1, type: 'queued', v: 1 }])
+  await s.feed([{ ...MATCHED, session_id: '' }])
+  await s.clock.advance(600)
+  await turnEnd($, s.clock)
+  await s.feed([{ seq: 3, type: 'session_ended', v: 1 }])
+  expect(await texts(await pane($))).toEqual([COPY_ENDED])
+})
+
+test('the keepsake id never leaves: no fetch carries it', X, async ($, on) => {
+  on('ui.copy', () => ({ value: { isCopied: true } }))
+  const { clock, feed, log, said } = await held($, on)
+  await feed([{ seq: 3, type: 'session_ended', v: 1 }])
+  await (await pane($)).press({ key: 'keep-copy' })
+  await clock.settle()
+  for (const r of log) {
+    expect(r.url.includes('s-1')).toBe(false)
+    expect((r.body ?? '').includes('s-1')).toBe(false)
+  }
+  expect(said.some((x) => x.includes('s-1'))).toBe(false)
+})
+
+test('person close dismisses a keepsake; a plugin close keeps it', async () => {
+  const { $, chatState } = fakeChat$()
+  await applyEvents($, [MATCHED as any])
+  await flush()
+  await onModelBack($, true)
+  await markKept($)
+  await applyEvents($, [{ seq: 3, type: 'session_ended' }])
+  expect(chatState().keepsake).toEqual({ id: 's-1', copy: 'none' })
+  await onChatClose($, { kind: 'plugin' })
+  expect(chatState().keepsake).not.toBe(null)
+  await onChatClose($, { kind: 'person' })
+  expect(chatState()).toMatchObject({ keepsake: null, ended: false, placed: false })
+})
+
+test('a pending keepsake outlives the next turn: leave, new burst, Claude back again', X, async ($, on) => {
+  const { clock, closes } = await held($, on)
+  await runCommand($, 'leave')
+  await clock.settle()
+  await turnStart($, clock)
+  await turnEnd($, clock)
+  expect(closes).toEqual([])
+  expect(await texts(await pane($))).toEqual([KEEP_NOTE, 's-1'])
+})
+
+test('kept, peer ends while searching, then the burst ends: the ended line and the offer stay', X, async ($, on) => {
+  const { clock, feed, closes } = await held($, on)
+  await turnStart($, clock)
+  await feed([{ seq: 3, type: 'session_ended', v: 1 }])
+  await turnEnd($, clock)
+  expect(closes).toEqual([])
+  expect(await texts(await pane($))).toEqual([COPY_ENDED, KEEP_NOTE, 's-1'])
+})
+
+test('kept, peer ends while unplaced: the band hints; /claudingtin chat shows the offer without an ended line', X, async ($, on) => {
+  const { clock, feed } = await held($, on, { open: (n) => (n === 1 ? { isPlaced: false, reason: 'narrow' } : { isPlaced: true }) })
+  await feed([{ seq: 3, type: 'session_ended', v: 1 }])
+  expect(await bandText($)).toBe(KEEP_BAND)
+  await runCommand($, 'chat')
+  await clock.settle()
+  expect(await texts(await pane($))).toEqual([KEEP_NOTE, 's-1'])
+})
+
+test('the id comes from matched, never session_ended: a stray session_id there changes nothing', X, async ($, on) => {
+  const { feed } = await held($, on)
+  await feed([{ seq: 3, type: 'session_ended', v: 1, session_id: 's-x' }])
+  expect(await texts(await pane($))).toEqual([COPY_ENDED, KEEP_NOTE, 's-1'])
+})
+
+test('done while searching: the offer goes, the spinner carries on', X, async ($, on) => {
+  const { clock, feed } = await held($, on)
+  await turnStart($, clock)
+  await feed([{ seq: 3, type: 'session_ended', v: 1 }])
+  await (await pane($)).press({ key: 'keep-done' })
+  await clock.settle()
+  expect(await texts(await pane($))).toEqual(['no chat going right now.'])
+  expect(await bandText($)).toMatch(/^. looking for someone$/)
+})
+
+test('copy fails, then works: the calm line gives way to copied', X, async ($, on) => {
+  let n = 0
+  on('ui.copy', () => ({ value: ++n === 1 ? { isCopied: false, reason: 'no-clipboard' } : { isCopied: true } }))
+  const { clock, feed } = await held($, on)
+  await feed([{ seq: 3, type: 'session_ended', v: 1 }])
+  await (await pane($)).press({ key: 'keep-copy' })
+  await clock.settle()
+  await (await pane($)).press({ key: 'keep-copy' })
+  await clock.settle()
+  const ui = await pane($)
+  expect(await texts(ui)).toEqual([COPY_ENDED, KEEP_NOTE, 's-1'])
+  expect(await buttons(ui)).toEqual(['copied', 'done'])
+})
+
+test('a hold that never landed is not kept: its end offers nothing', async () => {
+  const { $, chatState } = fakeChat$()
+  await applyEvents($, [MATCHED as any])
+  await flush()
+  expect(await onModelBack($, true)).toBe('hold')
+  // link.ts: the held write failed, so clearBack runs and markKept never does.
+  await clearBack($)
+  await applyEvents($, [{ seq: 3, type: 'session_ended' }])
+  expect(chatState().keepsake).toBe(null)
+})
+
+test('a session_id with a newline: the offer is one line', async () => {
+  const { $, chatState } = fakeChat$()
+  await applyEvents($, [{ ...MATCHED, session_id: 's-1\nx' } as any])
+  await flush()
+  await onModelBack($, true)
+  await markKept($)
+  await applyEvents($, [{ seq: 3, type: 'session_ended' }])
+  expect(chatState().keepsake).toEqual({ id: 's-1 x', copy: 'none' })
 })
