@@ -2,7 +2,10 @@
 // key -> session map, the strict-FIFO wait queue, the active pairings, the
 // session_id mint, and the opener rotation cursor, and every other goroutine
 // touches that state only by sending a command on a channel (architecture
-// decision AD-8). The hub goroutine never
+// decision AD-8). It also owns the in-memory policy (blocks, cooldowns, bans;
+// Story 4.1), loaded once at startup: matching reads only that, and a policy
+// change writes through to the Writer (the SQLite mirror) — the hub's only
+// I/O. The hub goroutine never
 // performs network I/O and writes no logs — a takeover only closes the displaced
 // session's evict channel; a match, teardown, or chat relay only does a
 // non-blocking send of a ready-to-write proto frame onto a Session.Outbound
@@ -101,14 +104,20 @@ var ReconnectGraceWindow = 10 * time.Second
 type Hub struct {
 	commands chan command
 	stopped  chan struct{}
+	cfg      config
 }
 
-// New returns a Hub whose goroutine is not yet running; call Run.
-func New() *Hub {
-	return &Hub{
+// New returns a Hub whose goroutine is not yet running; call Run. With no
+// options the policy is empty and nothing is written through.
+func New(opts ...Option) *Hub {
+	h := &Hub{
 		commands: make(chan command),
 		stopped:  make(chan struct{}),
 	}
+	for _, o := range opts {
+		o(&h.cfg)
+	}
+	return h
 }
 
 // Run owns the registry map, the FIFO wait queue, the active pairings, the
@@ -127,10 +136,12 @@ func (h *Hub) Run(ctx context.Context) {
 		openers:  backend.Openers(),
 	}
 
-	// The one eligibility seam. Story 2.1: any non-self successor is eligible.
-	// Epic 4 ANDs block / cooldown / ban predicates into this closure without
+	// The one eligibility seam. Story 2.1: any non-self successor is eligible;
+	// Story 4.1 ANDs in block / cooldown / ban, read from memory only, without
 	// touching the scan or the loop.
-	eligible := func(a, b *Session) bool { return a.Key != b.Key }
+	policy := newPolicyState(h.cfg)
+	p.admit = policy.admits
+	eligible := func(a, b *Session) bool { return policy.allows(a.Key, b.Key) }
 
 	for {
 		select {
@@ -340,11 +351,17 @@ type pairingState struct {
 	pairings     map[*Session]*Session
 	openers      []string
 	openerCursor int
+	// admit gates every enqueue (Story 4.1): a banned key never joins the
+	// queue, so it can never sit at the head and stall everyone behind it.
+	admit func(key string) bool
 }
 
 // enqueue appends s to the tail of the wait queue unless it is already queued or
 // already in a pairing. It reports whether s was actually added.
 func (p *pairingState) enqueue(s *Session) bool {
+	if p.admit != nil && !p.admit(s.Key) {
+		return false
+	}
 	if _, paired := p.pairings[s]; paired {
 		return false
 	}
