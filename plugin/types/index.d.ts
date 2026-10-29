@@ -61,7 +61,13 @@ export type Chat = {
   persist: boolean
   /** Held past the burst: the person's Claude is back and the chat stays open. */
   back: boolean
+  /** Held past the burst at least once (Story 3.7): its end offers the keepsake. */
+  kept: boolean
+  /** The session-ID offer after a kept chat ended; null when none is pending. */
+  keepsake: Keepsake | null
 }
+
+export type Keepsake = { id: string; copy: 'none' | 'copied' | 'failed' }
 
 declare module 'claude-code' {
   interface PluginState {

@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-01-2026 02:10
-last_updated: 10-28-2026 00:00
+last_updated: 2026-10-29
 project: claudingtin
 project_key: NOKEY
 tracking_system: file-system
@@ -62,8 +62,8 @@ development_status:
   3-4-reconnect-grace-window: done
   3-5-silent-re-enqueue-while-busy: done            # PR #30 merged 2026-09-16
   # Epic 3 paused after 3-5; 3-6/3-7 resume after epic-7 (mods pivot 2026-10-17)
-  3-6-persist-toggle-default-on: review
-  3-7-session-id-keepsake-on-persisted-chat-end: backlog
+  3-6-persist-toggle-default-on: done                # PR #40
+  3-7-session-id-keepsake-on-persisted-chat-end: review
   epic-3-retrospective: optional
 
   # Mods pivot (sprint-change-proposal-2026-10-17.md). Build order:
