@@ -117,3 +117,76 @@ func TestOpenPolicyHubEnforcesPersistedPolicy(t *testing.T) {
 		t.Fatal("a banned key must never be matched")
 	}
 }
+
+// Story 4.2: a block made through serve's hub is written through, survives a
+// restart, and touches no profile row.
+func TestBlockSurvivesARestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "p.db")
+	sess := func(k string) *hub.Session {
+		return &hub.Session{Key: k, Evict: make(chan struct{}), Outbound: make(chan any, 8)}
+	}
+	matchedSID := func(x *hub.Session, within time.Duration) string {
+		deadline := time.After(within)
+		for {
+			select {
+			case m := <-x.Outbound:
+				if mm, ok := m.(proto.Matched); ok {
+					return mm.SessionID
+				}
+			case <-deadline:
+				return ""
+			}
+		}
+	}
+	run := func() (*store.Store, *hub.Hub, func()) {
+		db, h, err := openPolicyHub(ctx, path, time.Now(), quiet)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { h.Run(runCtx); close(done) }()
+		return db, h, func() { cancel(); <-done; _ = db.Close() }
+	}
+
+	_, h, stop := run()
+	a, b := sess("a"), sess("b")
+	for _, x := range []*hub.Session{a, b} {
+		h.Register(x)
+		h.Ready(x)
+		time.Sleep(10 * time.Millisecond)
+	}
+	sid := matchedSID(a, time.Second)
+	if sid == "" || matchedSID(b, time.Second) != sid {
+		t.Fatal("a and b should pair first")
+	}
+	h.Block(a, sid)
+	h.Count() // a round trip: the block (and its write-through) is done
+	stop()
+
+	db, h2, stop2 := run()
+	defer stop2()
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var profiles int
+	if err := raw.QueryRowContext(ctx, "SELECT count(*) FROM profile").Scan(&profiles); err != nil || profiles != 0 {
+		t.Fatalf("profile rows = %d, err %v; a block must touch none", profiles, err)
+	}
+	p, err := db.LoadPolicy(ctx, time.Now().UnixMilli())
+	if err != nil || len(p.Blocks) != 1 || p.Blocks[0] != [2]string{"a", "b"} {
+		t.Fatalf("blocks after restart = %v, err %v", p.Blocks, err)
+	}
+	a2, b2 := sess("a"), sess("b")
+	for _, x := range []*hub.Session{a2, b2} {
+		h2.Register(x)
+		h2.Ready(x)
+		time.Sleep(10 * time.Millisecond)
+	}
+	if matchedSID(a2, 300*time.Millisecond) != "" {
+		t.Fatal("a and b matched again after a restart")
+	}
+}

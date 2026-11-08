@@ -146,6 +146,9 @@ func (ps *policyState) addBlock(ctx context.Context, blocker, blocked string) {
 	if !validPair(blocker, blocked) {
 		return
 	}
+	if _, ok := ps.blocks[[2]string{blocker, blocked}]; ok {
+		return // already blocked: no second write
+	}
 	ps.blocks[[2]string{blocker, blocked}] = struct{}{}
 	ps.write(ctx, func(c context.Context) error {
 		return ps.writer.PutBlock(c, blocker, blocked, ps.now().UnixMilli())

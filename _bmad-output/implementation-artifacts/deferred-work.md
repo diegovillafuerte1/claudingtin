@@ -332,3 +332,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-1-persisted-policy-store-and-single-writer-load.md`
   summary: Write-through runs synchronously on the hub goroutine (bounded at 2 s by writeBudget); if 4.4's cooldown write volume or CLI lock contention shows up as hub latency, move writes to an ordered writer goroutine.
   evidence: Spec Design Notes accepted synchronous writes; reviewers flagged the stall risk under a CLI-held write lock.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-2-one-tap-block.md`
+  summary: `/v1/send` answers 204 both for a recorded block and for one naming no reachable chat, so the mod cannot tell the person a block did not land; Story 4.3's block list will show the truth, and a distinct result could be added then.
+  evidence: hub blockCmd no-ops on an unknown session_id; v1.go always writes 204 for an accepted client message.
