@@ -406,13 +406,18 @@ for (const [kind, via] of [
   ['report', 'button'],
   ['report', 'command'],
 ] as const) {
-  test(`${kind} (${via}): ${kind} once, then exactly one leave`, X, async ($, on) => {
+  // Story 4.2: a block names its chat and ends it alone; a report is still followed by a leave (4.6).
+  test(`${kind} (${via}): ${kind === 'block' ? 'exactly one block naming the chat, no leave' : 'report once, then exactly one leave'}`, X, async ($, on) => {
     const { log, closes, clock } = await matched($, on)
     if (via === 'button') await (await pane($)).press({ key: kind })
     else await runCommand($, kind)
     await clock.settle()
     const s = sends(log).filter((m) => m.type !== 'ready')
-    expect(s).toEqual([kind === 'block' ? { type: 'block', v: 1 } : { type: 'report', v: 1, last_n: 5 }, { type: 'leave', v: 1 }])
+    expect(s).toEqual(
+      kind === 'block'
+        ? [{ type: 'block', v: 1, session_id: 's-1' }]
+        : [{ type: 'report', v: 1, last_n: 5 }, { type: 'leave', v: 1 }],
+    )
     expect(closes).toContainEqual({ id: 'claudingtin-chat', origin: 'plugin' })
   })
 }
@@ -612,16 +617,50 @@ test('peer ended while not placed: band back to searching, no ended line lingers
   expect(await texts(await pane($))).toEqual(['no chat going right now.'])
 })
 
-test('block / report settle before the leave goes out', X, async ($, on) => {
+test('a report settles before the leave goes out', X, async ($, on) => {
   let release!: () => void
   const held = new Promise<{ status: number }>((r) => (release = () => r({ status: 204 })))
-  const { log, clock } = await matched($, on, { send: (r) => (JSON.parse(r.body!).type === 'block' ? held : { status: 204 }) })
-  await runCommand($, 'block')
+  const { log, clock } = await matched($, on, { send: (r) => (JSON.parse(r.body!).type === 'report' ? held : { status: 204 }) })
+  await runCommand($, 'report')
   await clock.settle()
-  expect(sends(log).map((m) => m.type)).toEqual(['ready', 'block'])
+  expect(sends(log).map((m) => m.type)).toEqual(['ready', 'report'])
   release()
   await clock.settle()
-  expect(sends(log).map((m) => m.type)).toEqual(['ready', 'block', 'leave'])
+  expect(sends(log).map((m) => m.type)).toEqual(['ready', 'report', 'leave'])
+})
+
+test('a block is never followed by a leave once it lands; the chat clears and the Pane closes', X, async ($, on) => {
+  const { log, clock, closes } = await matched($, on)
+  await runCommand($, 'block')
+  await clock.settle()
+  await clock.advance(1000)
+  expect(sends(log).map((m) => m.type)).toEqual(['ready', 'block'])
+  expect(closes).toContainEqual({ id: 'claudingtin-chat', origin: 'plugin' })
+  expect(await bandText($)).toMatch(/^. looking for someone$/)
+})
+
+for (const [name, reply] of [
+  ['500', { status: 500 }],
+  ['network error', 'throw'],
+] as const) {
+  test(`a block that fails (${name}) falls back to one leave, then ready again while the burst lasts`, X, async ($, on) => {
+    const { log, clock } = await matched($, on, { send: (r) => (JSON.parse(r.body!).type === 'block' ? (reply as any) : { status: 204 }) })
+    await runCommand($, 'block')
+    await clock.settle()
+    expect(sends(log).map((m) => m.type)).toEqual(['ready', 'block', 'leave', 'ready'])
+    expect(await bandText($)).toMatch(/^. looking for someone$/)
+  })
+}
+
+test('a chat with no session_id: block sends a lone leave (nothing to name), then ready again', X, async ($, on) => {
+  const s = await start($, on)
+  await turnStart($, s.clock)
+  await s.feed([{ seq: 1, type: 'queued', v: 1 }])
+  await s.feed([{ ...MATCHED, session_id: '' }])
+  await s.clock.advance(600)
+  await runCommand($, 'block')
+  await s.clock.settle()
+  expect(sends(s.log).map((m) => m.type)).toEqual(['ready', 'leave', 'ready'])
 })
 
 // The engine's test `$` cannot raise a person's close, so this drives the
@@ -748,14 +787,36 @@ test('held, own leave: exactly one leave, then the withheld busy, Pane kept for 
   expect(await texts(await pane($))).toEqual([KEEP_NOTE, 's-1'])
 })
 
-for (const verb of ['block', 'report'] as const) {
-  test(`held, ${verb}: ${verb}, leave, then busy, in that order`, X, async ($, on) => {
-    const { clock, log } = await held($, on)
-    await runCommand($, verb)
-    await clock.settle()
-    expect(lines(log).filter((l) => l.startsWith('send')).slice(-3)).toEqual([`send ${verb}`, 'send leave', 'send busy'])
-  })
-}
+// Claude is back on a held chat: busy goes first, so the backend never re-queues
+// the blocker, then the block naming the chat; busy is never repeated.
+test('held, block: busy, then the block, once each', X, async ($, on) => {
+  const { clock, log } = await held($, on)
+  await runCommand($, 'block')
+  await clock.settle()
+  await clock.advance(1000)
+  expect(lines(log).filter((l) => l.startsWith('send')).slice(-2)).toEqual(['send busy', 'send block'])
+  expect(busies(log)).toBe(1)
+  expect(leaves(log)).toBe(0)
+  expect(sends(log).find((m) => m.type === 'block')).toEqual({ type: 'block', v: 1, session_id: 's-1' })
+})
+
+test('held, block: a busy that fails is retried, never marked sent', X, async ($, on) => {
+  let n = 0
+  const { clock, log } = await held($, on, { send: (r) => (JSON.parse(r.body!).type === 'busy' && ++n === 1 ? { status: 503 } : { status: 204 }) })
+  await runCommand($, 'block')
+  await clock.settle()
+  await clock.advance(1000)
+  const types = sends(log).map((m) => m.type).filter((t) => t !== 'ready')
+  expect(types).toEqual(['busy', 'block', 'busy'])
+  expect(leaves(log)).toBe(0)
+})
+
+test('held, report: report, leave, then busy, in that order', X, async ($, on) => {
+  const { clock, log } = await held($, on)
+  await runCommand($, 'report')
+  await clock.settle()
+  expect(lines(log).filter((l) => l.startsWith('send')).slice(-3)).toEqual(['send report', 'send leave', 'send busy'])
+})
 
 test('held, handle lost (events 410): hold dropped, chat reset to the keepsake, nothing more sent', X, async ($, on) => {
   const { failPoll, log, closes } = await held($, on)

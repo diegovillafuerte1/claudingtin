@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-01-2026 02:10
-last_updated: 2026-10-29
+last_updated: 2026-11-08
 project: claudingtin
 project_key: NOKEY
 tracking_system: file-system
@@ -78,8 +78,8 @@ development_status:
   epic-7-retrospective: optional
 
   epic-4: in-progress
-  4-1-persisted-policy-store-and-single-writer-load: review
-  4-2-one-tap-block: backlog
+  4-1-persisted-policy-store-and-single-writer-load: done      # PR #42
+  4-2-one-tap-block: review
   4-3-block-list-view-and-unblock: backlog
   4-4-auto-cooldown-between-just-matched-pairs: backlog
   4-5-per-account-key-rate-limits: backlog

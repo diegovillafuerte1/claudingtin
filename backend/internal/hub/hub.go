@@ -53,6 +53,64 @@ type Session struct {
 	WantsMatch      bool
 }
 
+// pastPair is one pairing an account key took part in.
+type pastPair struct{ sessionID, peerKey string }
+
+// maxRecentPairs is how many of an account key's pairings a block can name:
+// the current one and the one before it (Story 4.2). A block for anything
+// older is a no-op.
+const maxRecentPairs = 2
+
+// maxRecentKeys bounds recentPairs: past it, the account key whose pairings
+// were remembered longest ago is forgotten.
+const maxRecentKeys = 4096
+
+// recentPairs is the hub goroutine's memory of each account key's last
+// pairings (session_id -> counterpart key), keyed by account key rather than
+// by Session so it survives a resume, a takeover and a lapsed handle's
+// re-register: a block names exactly the chat it means even after its end
+// crossed the block on the wire or the blocker was already re-matched. It is
+// in memory only and dies with the process.
+type recentPairs struct {
+	byKey map[string][]pastPair
+	order []string // keys, least recently remembered first
+}
+
+func newRecentPairs() *recentPairs {
+	return &recentPairs{byKey: make(map[string][]pastPair)}
+}
+
+func (r *recentPairs) remember(key, sessionID, peerKey string) {
+	if _, ok := r.byKey[key]; ok {
+		for i, k := range r.order {
+			if k == key {
+				r.order = append(r.order[:i], r.order[i+1:]...)
+				break
+			}
+		}
+	}
+	r.order = append(r.order, key)
+	ps := append(r.byKey[key], pastPair{sessionID, peerKey})
+	if len(ps) > maxRecentPairs {
+		ps = ps[len(ps)-maxRecentPairs:]
+	}
+	r.byKey[key] = ps
+	for len(r.order) > maxRecentKeys {
+		delete(r.byKey, r.order[0])
+		r.order = r.order[1:]
+	}
+}
+
+// peer is the counterpart of key's pairing named sessionID, or "".
+func (r *recentPairs) peer(key, sessionID string) string {
+	for _, p := range r.byKey[key] {
+		if p.sessionID == sessionID {
+			return p.peerKey
+		}
+	}
+	return ""
+}
+
 type command interface{ isCommand() }
 
 type registerCmd struct{ s *Session }
@@ -66,6 +124,11 @@ type readyCmd struct{ s *Session }
 type busyCmd struct{ s *Session }
 
 type leaveCmd struct{ s *Session }
+
+type blockCmd struct {
+	s         *Session
+	sessionID string
+}
 
 type chatMsgCmd struct {
 	s   *Session
@@ -83,6 +146,7 @@ func (countCmd) isCommand()        {}
 func (readyCmd) isCommand()        {}
 func (busyCmd) isCommand()         {}
 func (leaveCmd) isCommand()        {}
+func (blockCmd) isCommand()        {}
 func (chatMsgCmd) isCommand()      {}
 func (graceExpiredCmd) isCommand() {}
 
@@ -134,6 +198,7 @@ func (h *Hub) Run(ctx context.Context) {
 	p := &pairingState{
 		pairings: make(map[*Session]*Session),
 		openers:  backend.Openers(),
+		recent:   newRecentPairs(),
 	}
 
 	// The one eligibility seam. Story 2.1: any non-self successor is eligible;
@@ -329,6 +394,32 @@ func (h *Hub) Run(ctx context.Context) {
 				// the Epic-4 eligibility seam — under a narrower predicate a
 				// blocking head leaving can free the sessions behind it.
 				p.drainQueue(eligible)
+			case blockCmd:
+				// Story 4.2: block the counterpart of the chat the block names,
+				// never "whoever is current". The live pairing ends through
+				// teardownPair, so the blocked peer's frame is the ordinary
+				// session_ended; the blocker gets no frame and, still wanting a
+				// match, is silently re-enqueued (the mod shows the spinner). A
+				// recent, already-ended pairing (its end crossed this block, or
+				// the blocker has since been re-matched) is recorded only: the
+				// current pairing, if any, is untouched. Anything else is a no-op.
+				if cmd.sessionID == "" {
+					break
+				}
+				target := p.recent.peer(cmd.s.Key, cmd.sessionID)
+				if target == "" {
+					break
+				}
+				policy.addBlock(ctx, cmd.s.Key, target)
+				// The live chat ends when it is with the blocked key: the one
+				// the block names, or a newer chat with the same person.
+				if peer, ok := p.pairings[cmd.s]; ok && peer.Key == target {
+					p.teardownPair(cmd.s)
+					if cmd.s.WantsMatch && cmd.s.graceTimer == nil {
+						p.enqueue(cmd.s)
+					}
+					p.drainQueue(eligible)
+				}
 			case chatMsgCmd:
 				// Route a chat line to the sender's paired peer only. This is a
 				// pure read of p.pairings plus the same non-blocking deliver the
@@ -354,6 +445,8 @@ type pairingState struct {
 	// admit gates every enqueue (Story 4.1): a banned key never joins the
 	// queue, so it can never sit at the head and stall everyone behind it.
 	admit func(key string) bool
+	// recent is each account key's last pairings, for scoped blocks (4.2).
+	recent *recentPairs
 }
 
 // enqueue appends s to the tail of the wait queue unless it is already queued or
@@ -463,6 +556,8 @@ func (p *pairingState) drainQueue(eligible func(a, b *Session) bool) {
 		m := proto.Matched{SessionID: newSessionID(), Opener: p.nextOpener()}
 		head.SessionID = m.SessionID
 		succ.SessionID = m.SessionID
+		p.recent.remember(head.Key, m.SessionID, succ.Key)
+		p.recent.remember(succ.Key, m.SessionID, head.Key)
 		deliver(head, m)
 		deliver(succ, m)
 		p.pairings[head] = succ
@@ -562,6 +657,16 @@ func (h *Hub) Busy(s *Session) {
 // silent-re-enqueue candidate, deliberately never s itself.
 func (h *Hub) Leave(s *Session) {
 	h.send(leaveCmd{s: s})
+}
+
+// Block blocks, for good, the counterpart of the pairing named sessionID: s's
+// account key's current one or the one before it (kept per account key, in
+// memory only). If s is live with the blocked key, that chat ends as Leave
+// would end it for the peer, and s is silently re-enqueued if it still wants
+// a match. Any other sessionID is a no-op. The block is written through to the
+// store (Story 4.2).
+func (h *Hub) Block(s *Session, sessionID string) {
+	h.send(blockCmd{s: s, sessionID: sessionID})
 }
 
 // Relay delivers msg to s's paired peer only, never back to s; it is a no-op if

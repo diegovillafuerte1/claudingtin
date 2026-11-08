@@ -19,7 +19,7 @@ var roundTripSamples = []any{
 	Busy{},
 	ChatMsg{ClientMsgID: "cmid-42", Text: "héllo 😀 مرحبا"},
 	Leave{},
-	Block{},
+	Block{SessionID: "s-9f8e7d6c5b4a"},
 	Report{LastN: 5},
 	ProfilePut{},
 	ForgetMe{},

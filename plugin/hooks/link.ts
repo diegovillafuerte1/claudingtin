@@ -495,6 +495,42 @@ export async function sendSeqNow($: EngineInterface, base: string, bodies: reado
   }
 }
 
+/**
+ * Ends the chat `sessionId` names by blocking its counterpart (Story 4.2). A
+ * held chat (Claude back) sends busy first, so the blocker is never re-matched
+ * while Claude is back; it is marked sent only once it lands, else the worker
+ * retries it. A block that gets no 2xx falls back to one leave, so the pair
+ * never lingers; with no session id there is nothing to name, and the leave
+ * goes alone. A leave tells the backend this side wants no match, so a burst
+ * still running has the worker send ready again. Meant to be voided by the
+ * caller. Never rejects.
+ */
+export async function sendBlockNow($: EngineInterface, base: string, sessionId: string): Promise<void> {
+  const ok = (r: Res | undefined) => r !== undefined && r.status >= 200 && r.status < 300
+  try {
+    const l = await getLink($)
+    const handle = l.handle
+    if (handle === null) return
+    let kick = false
+    if (l.held) {
+      await setLink($, (s) => (s.handle === handle && s.held ? { ...s, held: false, want: 'busy', sent: 'busy' } : s))
+      if (!ok(await postMsg($, base, handle, { type: 'busy', v: 1 }))) {
+        await setLink($, (s) => (s.handle === handle && s.sent === 'busy' ? { ...s, sent: null } : s))
+        kick = true
+      }
+    }
+    const r = sessionId === '' ? undefined : await postMsg($, base, handle, { type: 'block', v: 1, session_id: sessionId })
+    if (!ok(r)) {
+      await postMsg($, base, handle, { type: 'leave', v: 1 })
+      await setLink($, (s) => (s.handle === handle && s.want === 'ready' ? { ...s, sent: null } : s))
+      kick = true
+    }
+    if (kick) void work($, base)
+  } catch {
+    // Quiet.
+  }
+}
+
 export async function sendNow($: EngineInterface, base: string, body: Record<string, unknown>): Promise<void> {
   try {
     const { handle } = await getLink($)

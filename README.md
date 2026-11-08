@@ -37,7 +37,16 @@ It exposes exactly four HTTP routes:
   stays connected while a poll is in flight or ~5s after one ends; a lapsed lease
   is a disconnect and starts the ~10s reconnect grace window.
 - **`POST /v1/send`** — one client→server message: `ready`, `busy`, `chat_msg`,
-  `leave`. `block` and `report` are accepted but not acted on until Epic 4.
+  `leave`, `block`. A `block` carries the `session_id` of the chat it means
+  and permanently blocks that chat's counterpart (stored one way, enforced both
+  ways; no unblock until Story 4.3). If that chat is live it ends: the peer
+  sees only the ordinary `session_ended`, and the blocker stays queued while it
+  still wants a match. A block may also name the sender's previous chat (its
+  end crossed the block, or the sender was already re-matched): it is
+  recorded, and the current chat ends only if it is with the same person. Any
+  other `session_id` is a no-op that still answers `204`. Which chats can be
+  named is kept in memory per account key, so it does not survive a restart.
+  `report` is accepted but not acted on until Story 4.6.
 - **`GET /status`** — returns `200` with `application/json` body
   `{"concurrent_users": N}`, where `N` is the number of distinct connected
   account keys. A non-GET `/status` is `405`; every other path is `404`.

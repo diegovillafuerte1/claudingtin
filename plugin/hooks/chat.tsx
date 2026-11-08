@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, RenderInput, RenderSurface } from 'claude-code'
 import type { Chat, ChatLine, ChatMatch, Keepsake } from '../types'
-import { getLink, releaseHold, sendNow, sendSeqNow } from './link'
+import { getLink, releaseHold, sendBlockNow, sendNow, sendSeqNow } from './link'
 
 // The chat surface (Story 7.5): the events the /v1 poll hands over drive a
 // small state in $.state (memory only, never disk), and the band and a Pane
@@ -313,32 +313,40 @@ export async function submitLine($: EngineInterface, base: string, raw: unknown)
 export type LeaveKind = 'leave' | 'block' | 'report'
 
 /**
- * Leave (or block / report, then leave) the current chat: exactly one leave
- * sent, the chat cleared, the Pane closed. False when no chat is going.
- * Never throws.
+ * Ends the current chat: a leave; a report, then a leave; or a block naming
+ * the chat (Story 4.2). The chat is cleared and the Pane closed (a kept chat's
+ * leave keeps it for the keepsake). False when no chat is going. Never throws.
  */
 export async function leaveChat($: EngineInterface, base: string, kind: LeaveKind): Promise<boolean> {
   try {
     const searching = await burstActive($)
     let left = false
     let offer: Keepsake | null = null
+    let sessionId = ''
     await setChat($, (c) => {
       left = c.phase === 'chatting' && !c.left
       if (!left) return c
+      sessionId = c.match?.sessionId ?? ''
       // Leaving keeps the thread back; blocking or reporting never does.
       offer = kind === 'leave' ? keepsakeOf(c) : null
       return { ...IDLE, phase: searching ? 'searching' : 'idle', left: true, keepsake: offer, placed: offer !== null && c.placed }
     })
     if (!left) return false
-    // In order on the wire (block / report settles before the leave goes), never awaited here.
-    const bodies: Record<string, unknown>[] = []
-    if (kind === 'block') bodies.push({ type: 'block', v: 1 })
-    if (kind === 'report') bodies.push({ type: 'report', v: 1, last_n: REPORT_LAST_N })
-    bodies.push({ type: 'leave', v: 1 })
-    // A held chat's withheld busy follows once these settle (Claude is back).
-    void sendSeqNow($, base, bodies)
-      .then(() => releaseHold($, base))
-      .catch(() => {})
+    if (kind === 'block') {
+      // A block names its chat and ends it on its own (Story 4.2): the backend
+      // re-queues a blocker still in think-time, and a trailing leave would
+      // pull it back out. A held chat's busy goes first, inside sendBlockNow.
+      void sendBlockNow($, base, sessionId).catch(() => {})
+    } else {
+      // In order on the wire (a report settles before the leave goes), never awaited here.
+      const bodies: Record<string, unknown>[] = []
+      if (kind === 'report') bodies.push({ type: 'report', v: 1, last_n: REPORT_LAST_N })
+      bodies.push({ type: 'leave', v: 1 })
+      // A held chat's withheld busy follows once these settle (Claude is back).
+      void sendSeqNow($, base, bodies)
+        .then(() => releaseHold($, base))
+        .catch(() => {})
+    }
     // A keepsake stays on the Pane (or the band, when it is not placed).
     if (offer === null) closePane($)
     return true

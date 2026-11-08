@@ -534,16 +534,17 @@ func TestV1ChatRelayKeepsOrderAndMultiByteText(t *testing.T) {
 // The peer's session_ended is the same bare frame whatever ended the pairing.
 func TestV1PeerSessionEndedBytesIdenticalAcrossCauses(t *testing.T) {
 	canonical := string(encode(t, proto.SessionEnded{}))
-	causes := map[string]func(t *testing.T, h *harness, a *v1Client, key string){
-		"busy":      func(t *testing.T, h *harness, a *v1Client, key string) { a.mustSend(proto.Busy{}) },
-		"leave":     func(t *testing.T, h *harness, a *v1Client, key string) { a.mustSend(proto.Leave{}) },
-		"supersede": func(t *testing.T, h *harness, a *v1Client, key string) { v1Hello(t, h, key, "") },
+	causes := map[string]func(t *testing.T, h *harness, a *v1Client, key, sid string){
+		"busy":      func(t *testing.T, h *harness, a *v1Client, key, sid string) { a.mustSend(proto.Busy{}) },
+		"leave":     func(t *testing.T, h *harness, a *v1Client, key, sid string) { a.mustSend(proto.Leave{}) },
+		"block":     func(t *testing.T, h *harness, a *v1Client, key, sid string) { a.mustSend(proto.Block{SessionID: sid}) },
+		"supersede": func(t *testing.T, h *harness, a *v1Client, key, sid string) { v1Hello(t, h, key, "") },
 	}
 	for name, end := range causes {
 		t.Run(name, func(t *testing.T) {
 			h := newV1Harness(t, testV1Config())
-			a, b, _ := matchPair(t, h, "acct-a-"+name, "acct-b-"+name)
-			end(t, h, a, "acct-a-"+name)
+			a, b, sid := matchPair(t, h, "acct-a-"+name, "acct-b-"+name)
+			end(t, h, a, "acct-a-"+name, sid)
 			evs := b.until(proto.TypeSessionEnded)
 			var m map[string]any
 			if err := json.Unmarshal(evs[len(evs)-1].raw, &m); err != nil {
@@ -562,7 +563,8 @@ func TestV1SendRoutesAndValidates(t *testing.T) {
 	h := newV1Harness(t, testV1Config())
 	a := v1Hello(t, h, "acct-a", "")
 
-	// Client messages with no hub meaning yet are accepted and ignored.
+	// Client messages with no hub meaning yet are accepted and ignored; a block
+	// naming no chat of this session's is accepted and changes nothing.
 	for _, m := range []any{proto.Block{}, proto.Report{LastN: 3}, proto.ProfilePut{}, proto.ForgetMe{},
 		proto.NotePut{}, proto.Hello{AccountKey: "acct-a", ProtocolVersion: 1}, proto.Leave{}, proto.Busy{},
 		proto.ChatMsg{ClientMsgID: "u", Text: "unpaired"}} {
@@ -924,6 +926,64 @@ func TestV1OverflowBlocksNoStateEvents(t *testing.T) {
 	}
 }
 
+// Story 4.2: a block over /v1 ends the chat it names (the peer sees only the
+// ordinary session_ended), the blocker gets nothing and stays queued while it
+// wants a match, and the two are never matched again.
+func TestV1BlockEndsPairRequeuesBlockerAndNeverRematches(t *testing.T) {
+	h := newV1Harness(t, testV1Config())
+	a, b, sid := matchPair(t, h, "acct-a", "acct-b")
+
+	if code := a.send(proto.Block{SessionID: sid}); code != http.StatusNoContent {
+		t.Fatalf("block: status %d, want 204", code)
+	}
+	b.until(proto.TypeSessionEnded)
+	// Both queued again (a by the block, b by Story 3.5), never with each other.
+	a.quiet(300 * time.Millisecond)
+
+	c := v1Hello(t, h, "acct-c", "")
+	c.mustSend(proto.Ready{})
+	ec := c.until(proto.TypeMatched)
+	d := v1Hello(t, h, "acct-d", "")
+	d.mustSend(proto.Ready{})
+	ed := d.until(proto.TypeMatched)
+	ea := a.until(proto.TypeMatched)
+	eb := b.until(proto.TypeMatched)
+	sidOf := func(evs []v1Event) string { return eventMsg(t, evs[len(evs)-1]).(proto.Matched).SessionID }
+	sa, sb := sidOf(ea), sidOf(eb)
+	if sa == sb {
+		t.Fatal("a and b were rematched after a block")
+	}
+	newcomers := map[string]bool{sidOf(ec): true, sidOf(ed): true}
+	if !newcomers[sa] || !newcomers[sb] {
+		t.Fatal("a and b should each pair with a newcomer")
+	}
+	for _, e := range ea {
+		if e.Type == proto.TypeQueued || e.Type == proto.TypeSessionEnded {
+			t.Fatalf("the blocker saw %s", e.Type)
+		}
+	}
+}
+
+// A late block (naming a chat that has already ended) never touches the
+// blocker's new chat.
+func TestV1LateBlockLeavesTheNewChatAlone(t *testing.T) {
+	h := newV1Harness(t, testV1Config())
+	a, b, sidAB := matchPair(t, h, "acct-a", "acct-b")
+	b.mustSend(proto.Busy{})
+	a.until(proto.TypeSessionEnded)
+	c := v1Hello(t, h, "acct-c", "")
+	c.mustSend(proto.Ready{})
+	c.until(proto.TypeMatched)
+	a.until(proto.TypeMatched)
+
+	a.mustSend(proto.Block{SessionID: sidAB})
+	c.quiet(300 * time.Millisecond)
+	a.mustSend(proto.ChatMsg{ClientMsgID: "x", Text: "still here"})
+	if got := c.chatTexts(1); got[0] != "still here" {
+		t.Fatalf("c got %v", got)
+	}
+}
+
 // After busy or leave, a lease lapse must not replay ready.
 func TestV1LapseAfterBusyOrLeaveDoesNotRequeue(t *testing.T) {
 	for _, last := range []any{proto.Busy{}, proto.Leave{}} {
@@ -943,5 +1003,53 @@ func TestV1LapseAfterBusyOrLeaveDoesNotRequeue(t *testing.T) {
 			b.until(proto.TypeMatched)
 			a.quiet(300 * time.Millisecond)
 		})
+	}
+}
+
+// A late block (naming a chat that already ended) leaves the handle's current
+// session alone: a lease lapse afterwards resumes the new chat, so it never
+// ends for the innocent new partner.
+func TestV1LateBlockThenLapseResumesTheNewChat(t *testing.T) {
+	cfg := testV1Config()
+	cfg.leaseAfter = 100 * time.Millisecond
+	shrinkGrace(t, 2*time.Second)
+	h := newV1Harness(t, cfg)
+	a, b, sidAB := matchPair(t, h, "acct-a", "acct-b")
+	b.mustSend(proto.Busy{})
+	a.until(proto.TypeSessionEnded)
+	c := v1Hello(t, h, "acct-c", "")
+	c.mustSend(proto.Ready{})
+	c.until(proto.TypeMatched)
+	a.until(proto.TypeMatched)
+
+	a.mustSend(proto.Block{SessionID: sidAB})
+	time.Sleep(300 * time.Millisecond) // a's lease lapses mid-chat with c
+	a.mustSend(proto.ChatMsg{ClientMsgID: "x", Text: "still here"})
+	if got := c.chatTexts(1); got[0] != "still here" {
+		t.Fatalf("c got %v", got)
+	}
+	for _, e := range c.poll() {
+		if e.Type == proto.TypeSessionEnded {
+			t.Fatal("the late block ended the new chat")
+		}
+	}
+}
+
+// A blocker still in think-time whose lease lapses after the block re-registers
+// fresh: its ready is replayed (queued), and no stale resume earns it a stray
+// session_ended (the block cleared the handle's session).
+func TestV1LapseAfterBlockRequeuesWithoutAStraySessionEnded(t *testing.T) {
+	cfg := testV1Config()
+	cfg.leaseAfter = 100 * time.Millisecond
+	h := newV1Harness(t, cfg)
+	a, b, sid := matchPair(t, h, "acct-a", "acct-b")
+	a.mustSend(proto.Block{SessionID: sid})
+	b.until(proto.TypeSessionEnded)
+	time.Sleep(300 * time.Millisecond) // a's lease lapses
+	evs := a.until(proto.TypeQueued)
+	for _, e := range evs {
+		if e.Type == proto.TypeSessionEnded {
+			t.Fatal("the blocker saw a stray session_ended after a lapse")
+		}
 	}
 }

@@ -601,6 +601,13 @@ func (a *v1API) handleSend(w http.ResponseWriter, r *http.Request) {
 	case proto.Leave:
 		a.hub.Leave(h.sess)
 		h.sessionID = ""
+	case proto.Block:
+		// Scoped to the chat it names (Story 4.2). wantsMatch is left as it
+		// is: the blocker may still be in think-time and is re-enqueued.
+		a.hub.Block(h.sess, m.SessionID)
+		if m.SessionID != "" && m.SessionID == h.sessionID {
+			h.sessionID = ""
+		}
 	case proto.ChatMsg:
 		// No log line: even a content-free one would leak chat volume and timing.
 		a.hub.Relay(h.sess, m)

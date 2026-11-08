@@ -67,9 +67,13 @@ type Leave struct{}
 // TypeBlock is the discriminator for Block.
 const TypeBlock = "block"
 
-// Block asks the backend to block the current counterpart. Payload fields land
-// in a later epic.
-type Block struct{}
+// Block asks the backend to block the counterpart of the session SessionID
+// names (the session_id from that chat's matched). Only the sender's current
+// session and the one before it can be named; any other SessionID blocks no
+// one, so a late or retried block never lands on a newer partner (Story 4.2).
+type Block struct {
+	SessionID string `json:"session_id"`
+}
 
 // TypeReport is the discriminator for Report.
 const TypeReport = "report"
